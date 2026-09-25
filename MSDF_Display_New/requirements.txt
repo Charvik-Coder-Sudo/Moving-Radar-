@@ -1,0 +1,22 @@
+# MSDF Display - runtime dependencies.
+#
+# Every package here is imported by the application; nothing is listed "just in case".
+# Install with the setup script for your system, or:  pip install -r requirements.txt
+#
+# Lower bounds are the oldest releases this code is known to work with. They are deliberately
+# not pinned to exact versions: PySide6, VTK and NumPy ship platform-specific wheels, and hard
+# pins are what break an install on a different OS or Python version. The combination verified
+# on 2026-09-25 (Windows 11, Python 3.14.6) is noted beside each line.
+
+PySide6>=6.5            # Qt 6 GUI, QtMultimedia for the 3D ambience   (verified 6.11.2)
+numpy>=1.24             # all geometry, arrays and the npz cache        (verified 2.5.3)
+pandas>=2.0             # Scenario Export CSV parsing (first run only)  (verified 3.0.5)
+pyqtgraph>=0.13         # 2D world view and the Aircraft PPI            (verified 0.14.0)
+pyvista>=0.43           # 3D scene building                            (verified 0.49.0)
+pyvistaqt>=0.11         # the PyVista render window inside Qt          (verified 0.13.1)
+vtk>=9.2                # rendering (also a pyvista dependency; imported directly as vtkmodules)
+
+# Notes
+#  * vtk provides the vtkmodules package that visualization/view_3d.py imports directly.
+#  * PySide6 and pyvistaqt must agree on the Qt binding; QT_API=pyside6 is set by the app.
+#  * No SciPy, no Matplotlib, no network or telemetry packages are used.

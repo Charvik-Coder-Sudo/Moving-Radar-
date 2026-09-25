@@ -1,0 +1,96 @@
+{
+  "schema": "msdf_display_new/2",
+  "comment": "Isolated MSDF Radar Display. Two data sources only: the Scenario Export files (read-only: ownship, radar poses, scan schedule, sensor properties, truth target trajectories) and the RDP SystemTrack UDP stream (receive-only). Sensor parameters are read from the export at start-up, not stored here. Every path here is relative to the project folder, so this file stays valid wherever the project is copied; an absolute path is also accepted. The Scenario Export can be overridden with --export PATH or the MSDF_SCENARIO_EXPORT environment variable.",
+  "scenario_export": {
+    "comment": "root: relative to the project folder (portable) or absolute. If it does not exist, the application looks in data/Scenario_Export, ../Scenario_Export, Scenario_Export and sample_data/Scenario_Export, then explains where it looked.",
+    "root": "../Scenario_Export",
+    "time_unit": "ms",
+    "display_rate_hz": 50.0,
+    "sensor_properties_file": "Sensor_Properties/sensor_properties.json",
+    "ownship_file": "3D Trajectory/Ownship_Primary_Radar.csv",
+    "sensors": {
+      "1": {
+        "id": "PRIMARY",
+        "name": "Primary Radar",
+        "type": "primary",
+        "color": "#38bdf8",
+        "pose_file": "3D Trajectory/Ownship_Primary_Radar.csv",
+        "schedule_file": "Scan_Scheduler/Scan_Scheduler_Primary_Radar.csv"
+      },
+      "2": {
+        "id": "SECONDARY",
+        "name": "Secondary / IFF",
+        "type": "secondary",
+        "color": "#a78bfa",
+        "pose_file": "3D Trajectory/Ownship_Secondary_Radar.csv",
+        "schedule_file": "Scan_Scheduler/Scan_Scheduler_Secondary_Radar.csv"
+      }
+    },
+    "target_glob": "3D Trajectory/target_*.csv"
+  },
+  "rdp": {
+    "enabled": true,
+    "bind_host": "127.0.0.1",
+    "port": 9000,
+    "time_unit": "s (as sent; see docs/RDP_INTEGRATION.md)",
+    "stale_timeout_s": 3.0,
+    "hide_timeout_s": 10.0,
+    "stream_stale_timeout_s": 5.0,
+    "sender_silent_timeout_s": 5.0,
+    "trail_points": 200,
+    "packet_rate_window_s": 5.0,
+    "comment": "Live SystemTrack stream. Change the endpoint and the timeouts here rather than in the Python source; --rdp-port and --no-rdp override at start-up. retry_bind_s: how often the receiver retries while the port is unavailable.",
+    "retry_bind_s": 2.0
+  },
+  "live": {
+    "comment": "World clock follows the newest packet time while packets arrive.",
+    "follow_packets": true,
+    "max_lead_s": 2.0,
+    "restart_jump_s": 5.0,
+    "world_track_window_s": 10.0
+  },
+  "display": {
+    "frame_rate_hz": 30,
+    "table_rate_hz": 5,
+    "playback_rate": 1.0,
+    "trail_seconds": 60.0,
+    "velocity_vector_seconds": 20.0,
+    "acceleration_vector_scale_s2": 150.0,
+    "aircraft_scale": 40.0,
+    "target_marker_scale": 1.0,
+    "coverage_draw_range_m": null,
+    "ppi_range_m": 150000.0,
+    "terrain_extent_m": 400000.0,
+    "grid_spacing_m": 10000.0,
+    "depth_peeling": false
+  },
+  "layers": {
+    "show_ownship": true,
+    "show_ownship_trail": true,
+    "show_sensors": true,
+    "show_coverage": true,
+    "show_scan_beam": true,
+    "show_range_rings": true,
+    "show_scenery": true,
+    "show_targets": true,
+    "show_target_history": true,
+    "show_sensor_tracks": true,
+    "show_fused_tracks": true,
+    "show_target_trails": true,
+    "show_velocity_vectors": true,
+    "show_acceleration_vectors": false,
+    "show_target_labels": true
+  },
+  "audio": {
+    "comment": "Aircraft background ambience while the 3D view is on screen. Represents no data.",
+    "enabled": true,
+    "volume": 0.25,
+    "file": "assets/aircraft_background.wav"
+  },
+  "logging": {
+    "comment": "Rotating file log in logs/. level: DEBUG, INFO, WARNING or ERROR.",
+    "level": "INFO",
+    "max_bytes": 2097152,
+    "backups": 3
+  }
+}

@@ -1,0 +1,25 @@
+# The virtual environment lives inside the project (the setup scripts create it there).
+.venv/
+venv/
+
+# Written by the application, never by hand.
+logs/
+cache/
+
+# A Scenario Export copied next to the application: real recorded data, not source.
+data/Scenario_Export/
+sample_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
