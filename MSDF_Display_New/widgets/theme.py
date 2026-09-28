@@ -20,6 +20,11 @@ QStatusBar { background: #070d18; color: #94a3b8; }
 #StatePill[state="nodata"] { color: #f87171; background: #2a1111; border: 1px solid #7f1d1d; }
 
 #NavPanel { background: #0a1322; border-right: 1px solid #1e293b; }
+#SidebarRail { background: #0a1322; border-right: 1px solid #1e293b; }
+#SidebarRailText { color: #47607d; font-size: 7pt; letter-spacing: 1px; }
+#SidebarToggle { background: transparent; border: 1px solid #1e3a5f; border-radius: 3px;
+                 color: #7dd3fc; padding: 1px 3px; }
+#SidebarToggle:hover { background: #12203a; border-color: #38bdf8; }
 #NavButton { text-align: left; padding: 6px 10px; background: #0f1a2e; border: 1px solid #1e293b;
              color: #cbd5e1; }
 #NavButton:checked { background: #0e3a58; border-color: #38bdf8; color: #f0f9ff; }

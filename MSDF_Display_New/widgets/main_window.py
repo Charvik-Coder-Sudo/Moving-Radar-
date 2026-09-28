@@ -5,6 +5,7 @@
 │ Status · UDP · Packets · Rate · Tracks · Targets · Sim time · Last packet     │
 ├─────────────┬───────────────────────────────────────────┬─────────────────────┤
 │ Navigation  │  WORLD VIEW: 3D or 2D              [⤢]    │ Aircraft PPI  [⤢]   │
+│ [◀ collapse]│  (collapsed: a 26 px rail with [▶], Ctrl+B) │                     │
 │             │  playback bar (replay of the export)      │ Ownship             │
 ├─────────────┴───────────────────────────────────────────┴─────────────────────┤
 │                               TRACK DETAILS                                   │
@@ -38,6 +39,7 @@ LIVE_PILL = {"LIVE": "online", "WAITING FOR DATA": "paused", "NO DATA / STALE": 
              "UDP UNAVAILABLE": "nodata", "RDP OFF": "paused"}
 
 RATES = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
+SIDEBAR_RAIL_PX = 26            # width of the collapsed sidebar rail
 
 
 class PlaybackBar(QtWidgets.QFrame):
@@ -178,9 +180,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nav.setMinimumWidth(215)
         self.nav.settings.reload_requested.connect(controller.load_scenario)
         self.nav.settings.report_requested.connect(self.show_report)
+        self.nav.collapse_requested.connect(lambda: self.set_sidebar(False))
+        sidebar = self._build_sidebar()
 
         top = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        top.addWidget(self.nav)
+        top.addWidget(sidebar)
         top.addWidget(centre)
         top.addWidget(right)
         top.setStretchFactor(1, 1)
@@ -196,6 +200,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main.setStretchFactor(1, 1)
         main.setChildrenCollapsible(False)
         self.main_split, self.top_split = main, top
+        self._sidebar_width = 270          # restored when the sidebar is expanded again
         self._split_done = False
         root.addWidget(main, 1)
         self.setCentralWidget(central)
@@ -203,7 +208,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # maximise the world view in place (3D never changes window: its OpenGL context would be
         # recreated, see widgets.popout); the PPI pops out into its own window
         self.popouts = PopOutManager(self)
-        self.popouts.register_in_window("world", centre, "World view", self, [self.nav, right, self.table])
+        # the whole sidebar (panel or rail) is hidden while the world view is maximised, so its
+        # collapsed / expanded state is exactly what it was when the view is restored
+        self.popouts.register_in_window("world", centre, "World view", self,
+                                        [self.sidebar, right, self.table])
         self.popouts.register("ppi", self.ppi, "Aircraft PPI")
         self.popout_btns = {}
         for key, view, text, tip, name in (
@@ -249,6 +257,7 @@ class MainWindow(QtWidgets.QMainWindow):
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, controller.toggle)
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, lambda: controller.step(1.0))
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, lambda: controller.step(-1.0))
+        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+B"), self, self.toggle_sidebar)
         QtGui.QShortcut(QtGui.QKeySequence("3"), self, lambda: controller.set_view_mode("3d"))
         QtGui.QShortcut(QtGui.QKeySequence("2"), self, lambda: controller.set_view_mode("2d"))
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_F11), self, self._toggle_fullscreen)
@@ -300,6 +309,57 @@ class MainWindow(QtWidgets.QMainWindow):
         self.right_split.setSizes([int(rh * 0.64), int(rh * 0.36)])
 
     # ------------------------------------------------------------------ header
+    def _build_sidebar(self):
+        """The navigation panel plus the rail that replaces it when collapsed.
+
+        Both live in one container so the splitter sees a single child: collapsing swaps the
+        panel for a 26 px rail and the world view grows into the space, with no re-layout of
+        anything else and nothing to restart.
+        """
+        self.nav_rail = QtWidgets.QFrame(objectName="SidebarRail")
+        self.nav_rail.setFixedWidth(SIDEBAR_RAIL_PX)
+        rail = QtWidgets.QVBoxLayout(self.nav_rail)
+        rail.setContentsMargins(2, 6, 2, 6)
+        rail.setSpacing(6)
+        self.expand_btn = QtWidgets.QToolButton(text="▶", objectName="SidebarToggle")
+        self.expand_btn.setToolTip("Show the sidebar  (Ctrl+B)")
+        self.expand_btn.clicked.connect(lambda: self.set_sidebar(True))
+        rail.addWidget(self.expand_btn)
+        tag = QtWidgets.QLabel("N\nA\nV", objectName="SidebarRailText", alignment=QtCore.Qt.AlignHCenter)
+        tag.setToolTip("Navigation, display layers, sensors and settings")
+        rail.addWidget(tag)
+        rail.addStretch(1)
+        self.nav_rail.hide()
+
+        self.sidebar = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(self.sidebar)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.nav, 1)
+        lay.addWidget(self.nav_rail)
+        return self.sidebar
+
+    def set_sidebar(self, shown: bool):
+        """Show or collapse the left sidebar; the world view takes the space either way."""
+        if shown == self.nav.isVisible():
+            return
+        sizes = self.top_split.sizes()
+        self.nav.setVisible(shown)
+        self.nav_rail.setVisible(not shown)
+        self.sidebar.setMinimumWidth(0 if not shown else self.nav.minimumWidth())
+        width = (sizes[0] if shown else SIDEBAR_RAIL_PX)
+        if shown:
+            width = max(self._sidebar_width, self.nav.minimumWidth())
+        else:
+            self._sidebar_width = max(sizes[0], self.nav.minimumWidth())
+        centre = sizes[1] + (sizes[0] - width)
+        self.top_split.setSizes([width, max(centre, 200), sizes[2]])
+        if hasattr(self, "sidebar_action"):
+            self.sidebar_action.setChecked(shown)
+
+    def toggle_sidebar(self):
+        self.set_sidebar(not self.nav.isVisible())
+
     def _build_header(self):
         bar = QtWidgets.QFrame(objectName="Header")
         h = QtWidgets.QHBoxLayout(bar)
@@ -343,6 +403,10 @@ class MainWindow(QtWidgets.QMainWindow):
         v = self.menuBar().addMenu("&View")
         v.addAction("&3D View", lambda: self.ctrl.set_view_mode("3d"))
         v.addAction("&2D View", lambda: self.ctrl.set_view_mode("2d"))
+        self.sidebar_action = v.addAction("Show &Sidebar", self.toggle_sidebar)
+        self.sidebar_action.setCheckable(True)
+        self.sidebar_action.setChecked(True)
+        self.sidebar_action.setShortcut(QtGui.QKeySequence("Ctrl+B"))
         v.addAction("&Maximise World View", lambda: self.popouts.toggle("world"))
         v.addAction("Pop out Aircraft &PPI", lambda: self.popouts.toggle("ppi"))
         v.addSeparator()

@@ -130,6 +130,7 @@ class SettingsPage(QtWidgets.QWidget):
 
 class NavigationPanel(QtWidgets.QFrame):
     view_selected = QtCore.Signal(str)          # "3d" / "2d" / "ppi": open / maximise that view
+    collapse_requested = QtCore.Signal()        # the ◀ button in the panel header
 
     def __init__(self, controller, parent=None):
         super().__init__(parent, objectName="NavPanel")
@@ -137,7 +138,16 @@ class NavigationPanel(QtWidgets.QFrame):
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(4)
-        lay.addWidget(QtWidgets.QLabel("NAVIGATION", objectName="PanelTitle"))
+        # title row: the heading, and the control that collapses this panel to a thin rail
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(4)
+        head.addWidget(QtWidgets.QLabel("NAVIGATION", objectName="PanelTitle"), 1)
+        self.collapse_btn = QtWidgets.QToolButton(text="◀", objectName="SidebarToggle")
+        self.collapse_btn.setToolTip("Hide the sidebar  (Ctrl+B)")
+        self.collapse_btn.clicked.connect(self.collapse_requested)
+        head.addWidget(self.collapse_btn)
+        lay.addLayout(head)
 
         # the world view shows 3D or 2D; the Aircraft PPI can be opened in its own window
         self.view_group = QtWidgets.QButtonGroup(self)

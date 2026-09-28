@@ -26,6 +26,11 @@ Geometry: AIRCRAFT BODY FRAME, 0 deg at the top = nose, + clockwise (right).
                  under the marker at the ownship's speed.
     coverage     each sensor's field of view through its mount rotation, and the
                  current scan-beam dwell (scan schedule) at the displayed time.
+    ownship      a dedicated outlined triangle at the centre, always pointing up: in this
+                 frame "up" IS the aircraft's nose, so that orientation is the heading.
+                 Because the heading itself cannot be seen from a symbol that is fixed to
+                 the frame, the current heading is printed and north is marked on the ring,
+                 both of which turn as the ownship turns.
 
 Colour = classification (RDP packets carry none, so RDP tracks are Unknown; truth
 targets use the scenario's Auth); shape = track type. Faded = stale.
@@ -47,6 +52,7 @@ from widgets.legend_widget import LegendWidget
 KM = 1e-3
 RANGES_KM = [10, 25, 50, 100, 150, 200]
 OWNSHIP_SIZE_PX = 30            # larger than any track symbol: it is the platform, not a track
+NORTH_COLOR = "#cbd5e1"         # north reference: neutral, never a classification colour
 RING = "#334155"
 RING_OUTER = "#64748b"
 RING_TEXT = "#94a3b8"
@@ -146,6 +152,19 @@ class AircraftPPI(QtWidgets.QWidget):
         self.own.setData([dict(pos=(0, 0), size=OWNSHIP_SIZE_PX, symbol=symbols.OWNSHIP,
                                pen=pg.mkPen(style.OWNSHIP_OUTLINE, width=2.0),
                                brush=pg.mkBrush(style.OWNSHIP_COLOR))])
+        # north reference: where north lies relative to the nose, so the ownship heading is
+        # readable and visibly turns with the aircraft in a nose-up display
+        self.north_tick = pg.PlotCurveItem(pen=pg.mkPen(NORTH_COLOR, width=2.0))
+        self.north_tick.setZValue(46)
+        pl.addItem(self.north_tick)
+        self.north_label = pg.TextItem("N", color=NORTH_COLOR, anchor=(0.5, 0.5))
+        self.north_label.setFont(QtGui.QFont("Consolas", 9, QtGui.QFont.Bold))
+        self.north_label.setZValue(47)
+        pl.addItem(self.north_label)
+        self.hdg_label = pg.TextItem("", color=style.OWNSHIP_COLOR, anchor=(0, 0))
+        self.hdg_label.setFont(QtGui.QFont("Consolas", 9))
+        self.hdg_label.setZValue(47)
+        pl.addItem(self.hdg_label)
         self.tracks = TrackItems2D(pl, self.palette, z=10, label_size=8)
         self.hover = hover.HoverInspector(self.pw, self._hover_entries, self._describe)
         self._draw_static()
@@ -294,6 +313,28 @@ class AircraftPPI(QtWidgets.QWidget):
         b = tv.body_xyz
         return b[1] * KM, b[0] * KM, (b[1] + v[1]) * KM, (b[0] + v[0]) * KM
 
+    def _draw_north(self, own):
+        """North and the ownship heading, in the aircraft frame.
+
+        The aircraft's nose is always at the top here, so north sits at the bearing
+        ``-heading`` relative to it: as the ownship turns, this marker sweeps round the ring
+        while the ownship triangle stays pointing at its own nose.
+        """
+        show = own is not None and self.ctrl.layers.get("show_ownship", True)
+        for item in (self.north_tick, self.north_label, self.hdg_label):
+            item.setVisible(show)
+        if not show:
+            return
+        heading = float(own.heading_drawn)
+        rel = np.radians((-heading) % 360.0)
+        R = self.range_km
+        inner, outer = 0.90 * R, 1.0 * R
+        self.north_tick.setData([inner * np.sin(rel), outer * np.sin(rel)],
+                                [inner * np.cos(rel), outer * np.cos(rel)])
+        self.north_label.setPos(1.13 * R * np.sin(rel), 1.13 * R * np.cos(rel))
+        self.hdg_label.setText(f"HDG {heading:05.1f}\u00b0")
+        self.hdg_label.setPos(-1.16 * R, 1.16 * R)
+
     def _trail_xy(self, tv):
         """History in the aircraft frame: the object's own world path, converted ONCE with the
         ownship pose of the displayed frame (the same pose that places the marker).
@@ -368,6 +409,7 @@ class AircraftPPI(QtWidgets.QWidget):
         for sid, fov in self.fov.items():
             fov.setVisible(self.ctrl.sensor_visible.get(sid, True) and layers.get("show_coverage", True))
         self.own.setVisible(layers.get("show_ownship", True))
+        self._draw_north(self._frame.ownship if self._frame is not None else None)
         self._draw_beams(layers)
 
         tracks = [tv for tv in visible_tracks(self._views, layers)
@@ -406,8 +448,9 @@ class AircraftPPI(QtWidgets.QWidget):
                            if tv.body_xyz is not None and np.linalg.norm(tv.body_xyz) * KM > R)
         t = self._stats.get("last_packet_time")
         self.footer.setText(
-            "Aircraft frame (0° = nose) · △ own aircraft (outlined) · □ sensor track · ▲ fused "
-            "system track · colour = classification · faded = stale\n"
+            "Aircraft frame (0° = nose; N marks north, so it turns with the heading) · △ own "
+            "aircraft (outlined) · □ sensor track · ▲ fused system track · colour = "
+            "classification · faded = stale\n"
             f"{counts[style.PRIMARY]} primary · {counts[style.SECONDARY]} secondary · {counts[style.FUSED]} fused"
             f" · {counts[style.TARGET]} target(s)"
             + (f" · {out_of_range} beyond {R:g} km" if out_of_range else "")
