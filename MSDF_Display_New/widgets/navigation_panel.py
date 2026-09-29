@@ -1,9 +1,17 @@
-"""Left navigation panel: open / maximise a view, display layers, sensors and settings."""
+"""Left navigation panel: open / maximise a view, drive the camera, display layers,
+sensors and settings.
+
+The layer switches are grouped by what they belong to rather than listed flat, and each
+group folds away behind one switch: the operator turns a whole group on or off without
+reading fifteen lines. The groups cover every layer exactly once (GROUPS vs LAYERS, checked
+by tests/test_sidebar.py), so a new layer cannot quietly go missing from the panel.
+"""
 
 from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
+from visualization.view_3d import CAMERA_PRESETS
 from widgets.legend_widget import LegendWidget
 from widgets.sensor_panel import SensorPanel
 
@@ -27,20 +35,106 @@ LAYERS = [
 ]
 
 
+# (title, layer keys, open by default). Every key of LAYERS appears exactly once.
+GROUPS = [
+    ("OWNSHIP", ["show_ownship", "show_ownship_trail", "show_range_rings"], True),
+    ("TRUTH TARGETS", ["show_targets", "show_target_history"], True),
+    ("RDP TRACKS", ["show_sensor_tracks", "show_fused_tracks", "show_target_trails"], True),
+    ("SENSORS", ["show_sensors", "show_coverage", "show_scan_beam"], False),
+    ("LABELS & VECTORS", ["show_target_labels", "show_velocity_vectors",
+                          "show_acceleration_vectors"], False),
+    ("SCENE", ["show_scenery"], False),
+]
+
+
+class Section(QtWidgets.QWidget):
+    """A titled group of layer switches that folds away behind one switch of its own.
+
+    The header switch reports the group - on, off, or partly on - and switching it turns the
+    whole group on, or off if it is already fully on. Folding hides the rows, never the
+    header switch, so a group can be turned off without being opened."""
+
+    def __init__(self, title: str, boxes: list[QtWidgets.QCheckBox], opened: bool, parent=None):
+        super().__init__(parent)
+        self.boxes = boxes
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(1)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(4)
+        self.switch = QtWidgets.QCheckBox(objectName="GroupSwitch")
+        self.switch.setTristate(True)
+        self.switch.setToolTip(f"Turn the whole {title} group on or off")
+        self.switch.clicked.connect(self._switch_group)
+        head.addWidget(self.switch)
+        # a push button, not a tool button: only QPushButton honours text-align in a
+        # stylesheet, and a centred group title reads as a clipped one in a narrow panel.
+        # "&" in a button label is a mnemonic, so a title carrying one doubles it up.
+        self.title = title
+        self.fold = QtWidgets.QPushButton(self._label(True), objectName="SectionTitle")
+        self.fold.setCheckable(True)
+        self.fold.setChecked(opened)
+        self.fold.setFlat(True)
+        self.fold.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.fold.toggled.connect(self._set_open)
+        head.addWidget(self.fold, 1)
+        lay.addLayout(head)
+        self.body = QtWidgets.QWidget()
+        body = QtWidgets.QVBoxLayout(self.body)
+        body.setContentsMargins(14, 0, 0, 2)
+        body.setSpacing(1)
+        for cb in boxes:
+            cb.toggled.connect(self.sync)
+            body.addWidget(cb)
+        lay.addWidget(self.body)
+        self._set_open(opened)
+        self.sync()
+
+    def _label(self, opened):
+        return ("▾  " if opened else "▸  ") + self.title.replace("&", "&&")
+
+    def _set_open(self, opened):
+        self.body.setVisible(bool(opened))
+        self.fold.setText(self._label(bool(opened)))
+        self.fold.setToolTip("Fold this group away" if opened else "Open this group")
+
+    def _switch_group(self, *_):
+        on = not all(cb.isChecked() for cb in self.boxes)
+        for cb in self.boxes:
+            cb.setChecked(on)
+
+    def sync(self, *_):
+        """Show what the group is actually set to, without switching anything."""
+        n = sum(cb.isChecked() for cb in self.boxes)
+        state = QtCore.Qt.Checked if n == len(self.boxes) else \
+            (QtCore.Qt.Unchecked if n == 0 else QtCore.Qt.PartiallyChecked)
+        self.switch.blockSignals(True)
+        self.switch.setCheckState(state)
+        self.switch.blockSignals(False)
+
+
 class LayersPage(QtWidgets.QWidget):
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
         lay.addWidget(QtWidgets.QLabel("DISPLAY LAYERS", objectName="PanelTitle"))
+        tips = {key: tip for key, _text, tip in LAYERS}
+        labels = {key: text for key, text, _tip in LAYERS}
         self.boxes = {}
-        for key, text, tip in LAYERS:
-            cb = QtWidgets.QCheckBox(text)
+        for key in labels:
+            cb = QtWidgets.QCheckBox(labels[key])
             cb.setChecked(bool(controller.layers.get(key, True)))
             cb.toggled.connect(lambda on, k=key: controller.set_layer(k, on))
-            cb.setToolTip(tip)
-            lay.addWidget(cb)
+            cb.setToolTip(tips[key])
             self.boxes[key] = cb
+        self.sections = {}
+        for title, keys, opened in GROUPS:
+            sec = Section(title, [self.boxes[k] for k in keys], opened)
+            lay.addWidget(sec)
+            self.sections[title] = sec
         row = QtWidgets.QHBoxLayout()
         for text, on in (("All", True), ("None", False)):
             b = QtWidgets.QPushButton(text)
@@ -149,20 +243,29 @@ class NavigationPanel(QtWidgets.QFrame):
         head.addWidget(self.collapse_btn)
         lay.addLayout(head)
 
-        # the world view shows 3D or 2D; the Aircraft PPI can be opened in its own window
+        # The world view shows 3D or 2D; the Aircraft PPI can be opened in its own window.
+        # One row, not three stacked buttons: everything above the pages is fixed height, and
+        # what it takes comes straight out of the layer switches below.
         self.view_group = QtWidgets.QButtonGroup(self)
         self.view_btns = {}
-        for mode, text in (("3d", "3D View"), ("2d", "2D View"), ("ppi", "Aircraft PPI  ⤢")):
-            b = QtWidgets.QPushButton(text, checkable=True, objectName="NavButton")
-            if mode == "ppi":
-                b.setToolTip("Open the Aircraft PPI in its own maximised window (close it or Esc to return)")
-            else:
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(3)
+        for mode, text, tip in (("3d", "3D", "The 3D world view (key 3)"),
+                                ("2d", "2D", "The 2D world view (key 2)"),
+                                ("ppi", "PPI  ⤢", "Open the Aircraft PPI in its own maximised "
+                                                  "window (close it or Esc to return)")):
+            b = QtWidgets.QPushButton(text, checkable=True, objectName="NavTab", toolTip=tip)
+            if mode != "ppi":
                 b.setChecked(mode == controller.view_mode)
                 self.view_group.addButton(b)
             b.clicked.connect(lambda _=False, m=mode: self.view_selected.emit(m))
-            lay.addWidget(b)
+            row.addWidget(b, 1)
             self.view_btns[mode] = b
+        lay.addLayout(row)
 
+        line = QtWidgets.QFrame(frameShape=QtWidgets.QFrame.HLine, objectName="Sep")
+        lay.addWidget(line)
+        lay.addWidget(self._build_camera(controller))
         line = QtWidgets.QFrame(frameShape=QtWidgets.QFrame.HLine, objectName="Sep")
         lay.addWidget(line)
 
@@ -171,21 +274,85 @@ class NavigationPanel(QtWidgets.QFrame):
         self.layers = LayersPage(controller)
         self.sensors = SensorPanel(controller)
         self.settings = SettingsPage(controller)
+        tabs = QtWidgets.QHBoxLayout()
+        tabs.setSpacing(3)
         for i, (text, page) in enumerate((("Tracks", self.layers), ("Sensors", self.sensors),
                                           ("Settings", self.settings))):
-            b = QtWidgets.QPushButton(text, checkable=True, objectName="NavButton")
+            b = QtWidgets.QPushButton(text, checkable=True, objectName="NavTab")
             b.setChecked(i == 0)
             self.page_group.addButton(b, i)
             b.clicked.connect(lambda _=False, j=i: self.stack.setCurrentIndex(j))
-            lay.addWidget(b)
+            tabs.addWidget(b, 1)
             scroll = QtWidgets.QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
             scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             scroll.setWidget(page)
             self.stack.addWidget(scroll)
-        lay.addSpacing(6)
+        lay.addLayout(tabs)
         lay.addWidget(self.stack, 1)
+
+    def _build_camera(self, controller):
+        """The 3D camera, next to the view buttons: which preset holds it, and whether it
+        follows. The same controls as the 3D toolbar, kept in step with it by bind_camera."""
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(4)
+        row.addWidget(QtWidgets.QLabel("CAMERA", objectName="SectionLabel"))
+        row.addStretch(1)
+        self.cam_follow = QtWidgets.QCheckBox("Follow")
+        self.cam_follow.setToolTip("Keep the camera on the ownship, framing it automatically")
+        self.cam_debug = QtWidgets.QCheckBox("DEBUG")
+        self.cam_debug.setToolTip("Engineering overlay in the 3D view: attitude, velocity, "
+                                  "camera, scan state (D)")
+        row.addWidget(self.cam_follow)
+        row.addWidget(self.cam_debug)
+        lay.addLayout(row)
+        self.cam_preset = QtWidgets.QComboBox()
+        for label, key, shortcut in CAMERA_PRESETS:
+            self.cam_preset.addItem(f"{label}  ({shortcut})", key)
+        self.cam_preset.setToolTip("Camera preset. It eases into place and then holds the "
+                                  "ownship; dragging in the view hands the camera back to you.")
+        lay.addWidget(self.cam_preset)
+        self.camera_box = box
+        box.setEnabled(controller.view_mode == "3d")
+        controller.view_mode_changed.connect(lambda m: box.setEnabled(m == "3d"))
+        return box
+
+    def bind_camera(self, view3d):
+        """Two sets of controls, one camera: whichever the operator uses, both show it.
+
+        Each control here calls the view directly rather than synthesising a click on the
+        toolbar button, and the view's own ``toggled`` copies the resulting state back with
+        signals blocked - so there is one code path per control and no loop between them."""
+        def mirror(target, source):
+            target.blockSignals(True)
+            target.setChecked(source.isChecked())
+            target.blockSignals(False)
+
+        self.cam_preset.activated.connect(
+            lambda i: view3d.apply_camera(self.cam_preset.itemData(i)))
+        view3d.camera_changed.connect(self._show_preset)
+        self.cam_preset.setCurrentIndex(view3d.preset_box.currentIndex())
+
+        self.cam_follow.setChecked(view3d.follow_btn.isChecked())
+        self.cam_follow.clicked.connect(lambda: view3d.set_follow(self.cam_follow.isChecked()))
+        view3d.follow_btn.toggled.connect(
+            lambda *_: mirror(self.cam_follow, view3d.follow_btn))
+
+        self.cam_debug.setChecked(view3d.debug_btn.isChecked())
+        self.cam_debug.clicked.connect(
+            lambda: view3d.debug_btn.setChecked(self.cam_debug.isChecked()))
+        view3d.debug_btn.toggled.connect(lambda *_: mirror(self.cam_debug, view3d.debug_btn))
+
+    def _show_preset(self, key: str):
+        """Show the preset the view has just taken up. Nothing is applied from here."""
+        i = self.cam_preset.findData(key)
+        if i >= 0 and i != self.cam_preset.currentIndex():
+            self.cam_preset.setCurrentIndex(i)
 
     def show_page(self, i: int):
         self.page_group.button(i).setChecked(True)

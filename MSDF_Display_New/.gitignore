@@ -2,9 +2,12 @@
 .venv/
 venv/
 
-# Written by the application, never by hand.
+# Written by the application, never by hand. The export cache is derived from a Scenario
+# Export and runs to tens of megabytes, so every cache directory is kept out, whatever
+# scenario_export.cache_dir happens to name it.
 logs/
 cache/
+cache_*/
 
 # A Scenario Export copied next to the application: real recorded data, not source.
 data/Scenario_Export/

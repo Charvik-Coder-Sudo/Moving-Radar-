@@ -55,8 +55,17 @@ LIGHT_EDGE = "#93a7c4"          # runway edge lights (cool, never a classificati
 LIGHT_THRESHOLD = "#7fb0a0"
 
 PARCEL_HASH = (127.1, 311.7)        # fixed multipliers: the farmland pattern never changes
+SUN_DIRECTION = (0.55, -0.35, 0.62)  # the same sun the 3D view lights the scene with
+SHADE_GAIN = 1.8                     # slope exaggeration for relief shading only
+GROUND_LIFT = 1.25                   # baked exposure: daylight ground, not dusk
+HAZE_RGB = np.array([118.0, 140.0, 162.0])   # colour the distance fades into
+HAZE_START_M, HAZE_FULL_M = 55_000.0, 380_000.0
+# level of detail: (half-span in metres, grid resolution) from the aircraft outwards
+TERRAIN_LODS = ((45_000.0, 300), (160_000.0, 260), (520_000.0, 200))
+TERRAIN_REBUILD_M = 12_000.0        # the near tile follows the aircraft in steps this size
 WATER_LEVEL_M = 45.0
-AIRFIELD_FLAT_RADIUS_M = 9000.0     # terrain is levelled around the airfield so it sits flat
+AIRFIELD_FLAT_M = 3200.0            # dead flat out to here: the field itself
+AIRFIELD_BLEND_M = 11000.0          # blended into the surrounding relief by here
 
 
 def _hex(c):
@@ -64,14 +73,41 @@ def _hex(c):
     return np.array([int(c[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8)
 
 
+def _ridge(x, y, scale, phase):
+    """One ridged octave: |noise| inverted, which is what gives ranges their crests."""
+    n = _smooth_noise(x, y, scale, phase)
+    return 1.0 - np.abs(n)
+
+
 def base_relief(x, y):
-    """Smooth procedural relief, roughly 0 .. 1050 m. Visualisation only."""
-    h = (330 * np.sin(x / 23000.0) * np.cos(y / 31000.0)
-         + 210 * np.sin((x + y) / 17000.0 + 1.3)
-         + 110 * np.cos(x / 7000.0 - y / 9000.0)
-         + 420 * np.exp(-(((x - 25000) / 14000) ** 2 + ((y + 30000) / 11000) ** 2))
-         + 520 * np.exp(-(((x + 40000) / 16000) ** 2 + ((y - 35000) / 12000) ** 2)))
-    return np.maximum(h, -150.0) + 150.0
+    """Procedural landscape, roughly 0 .. 2600 m. Visualisation only - see the module note.
+
+    Built the way terrain actually reads: a few ridged octaves for the mountain ranges, a
+    smooth low-frequency mask so ranges occupy part of the map and plains the rest, and small
+    octaves for foothills and surface texture.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    # where mountains are allowed at all (0 = plain, 1 = full range), a slow field
+    region = _smooth_noise(x, y, 46000.0, 0.7)
+    mountains = np.clip(region * 1.5, 0.0, 1.0) ** 1.2
+
+    # ranges every few kilometres: this is the scale an aircraft at 5-10 km actually sees
+    ridges = (820.0 * _ridge(x, y, 9500.0, 1.1)
+              + 380.0 * _ridge(x, y, 4200.0, 2.7)
+              + 170.0 * _ridge(x, y, 1900.0, 4.3)
+              + 70.0 * _ridge(x, y, 850.0, 6.1))
+    hills = (140.0 * _smooth_noise(x, y, 11000.0, 3.1)
+             + 60.0 * _smooth_noise(x, y, 3800.0, 5.9)
+             + 22.0 * _smooth_noise(x, y, 1400.0, 8.2))
+    plains = 55.0 + 55.0 * _smooth_noise(x, y, 30000.0, 9.4)
+
+    h = plains + hills * (0.4 + 0.6 * mountains) + ridges * mountains
+    h = h - np.clip(0.4 - region, 0.0, 1.0) * 260.0          # basins between the ranges
+    # river valleys along the low-frequency minima: they carry the eye through the landscape
+    channel = 1.0 - np.abs(_smooth_noise(x, y, 21000.0, 11.3))
+    return np.maximum(h - np.clip((channel - 0.72) * 3.2, 0.0, 1.0) * 260.0, -40.0)
 
 
 def _smooth_noise(x, y, scale, phase=0.0):
@@ -82,13 +118,30 @@ def _smooth_noise(x, y, scale, phase=0.0):
     return (a + 0.6 * b + 0.45 * c) / 2.05
 
 
+def hillshade(z, dx: float, dy: float, sun=SUN_DIRECTION) -> np.ndarray:
+    """Relief shading from the surface normal and the sun, as a multiplier around 1.0.
+
+    A height ramp alone cannot show landform: two points at the same altitude on opposite
+    sides of a ridge must not be the same colour. This is what gives the ground its shape.
+    """
+    gy, gx = np.gradient(np.asarray(z, float), dy, dx)
+    # the slope is exaggerated for shading only (never for geometry): from 8 km up, true
+    # gradients of a couple of degrees would leave the landform almost unshaded
+    nx, ny, nz = -gx * SHADE_GAIN, -gy * SHADE_GAIN, np.ones_like(z)
+    norm = np.sqrt(nx * nx + ny * ny + nz * nz)
+    sun = np.asarray(sun, float)
+    sun = sun / np.linalg.norm(sun)
+    cos = (nx * sun[0] + ny * sun[1] + nz * sun[2]) / norm
+    return np.clip(0.42 + 0.82 * cos, 0.30, 1.18)
+
+
 def land_cover(x, y, h):
     """Per-point ground colour: height ramp, then farmland parcels, forest and water.
 
     This is what makes altitude and ground speed readable from 5-10 km: a plain surface gives
     the eye nothing to move past. Deterministic in (x, y) - no random state, no time."""
     x, y, h = np.asarray(x, float), np.asarray(y, float), np.asarray(h, float)
-    stops = np.array([WATER_LEVEL_M, WATER_LEVEL_M + 2.0, 150.0, 380.0, 700.0, 1000.0, 1250.0])
+    stops = np.array([WATER_LEVEL_M, WATER_LEVEL_M + 2.0, 200.0, 520.0, 950.0, 1500.0, 1900.0])
     cols = np.array([_hex(SHALLOW), _hex(LOWLAND), _hex(FIELD), _hex(FIELD), _hex(UPLAND),
                      _hex(ROCK), _hex(SNOW)], float)
     out = np.empty(h.shape + (3,))
@@ -101,9 +154,9 @@ def land_cover(x, y, h):
     farm = np.clip(1.0 - np.abs(h - 260.0) / 420.0, 0.0, 1.0)          # only on low, gentle ground
     out *= (1.0 + tint * farm)[..., None]
 
-    # forest patches
+    # forest patches: they stop at the tree line, which is itself an altitude cue
     wood = _smooth_noise(x, y, 9000.0, 2.1)
-    mask = np.clip((wood - 0.1) * 1.9, 0.0, 1.0) * np.clip(1.0 - np.abs(h - 420.0) / 850.0, 0.0, 1.0)
+    mask = np.clip((wood - 0.15) * 2.0, 0.0, 1.0) * np.clip(1.0 - np.abs(h - 450.0) / 800.0, 0.0, 1.0)
     out = out * (1 - mask[..., None]) + _hex(FOREST).astype(float) * mask[..., None]
 
     # lakes: flat water wherever the terrain is at or below the water level
@@ -221,17 +274,53 @@ class Scenery:
         x, y = np.asarray(x, float), np.asarray(y, float)
         h = np.maximum(base_relief(x, y), WATER_LEVEL_M - 12.0)
         d = np.hypot(x - self.airfield.center[0], y - self.airfield.center[1])
-        w = np.clip(1.0 - (d / AIRFIELD_FLAT_RADIUS_M) ** 2, 0.0, 1.0) ** 1.5
+        # an airfield is levelled ground: dead flat over the field itself, then blended into
+        # the surrounding relief - a runway on a 1 m slope is a runway nobody built
+        t = np.clip((d - AIRFIELD_FLAT_M) / (AIRFIELD_BLEND_M - AIRFIELD_FLAT_M), 0.0, 1.0)
+        w = 1.0 - t * t * (3.0 - 2.0 * t)                      # smoothstep, 1 inside the field
         return h * (1 - w) + self.airfield.elevation_m * w
 
     def terrain(self, center, extent, n=420) -> pv.StructuredGrid:
+        """One terrain tile. Kept for callers that want a single grid (the 2D map image)."""
         xs = np.linspace(center[0] - extent / 2, center[0] + extent / 2, n)
         ys = np.linspace(center[1] - extent / 2, center[1] + extent / 2, n)
         X, Y = np.meshgrid(xs, ys)
+        return self._tile(X, Y)
+
+    def terrain_lods(self, center) -> list[pv.StructuredGrid]:
+        """Concentric tiles, finest first: detail where the aircraft is, cheap at the horizon.
+
+        Cell sizes with the defaults: about 300 m under the aircraft, 1.2 km in the middle
+        distance and 5 km at the horizon, for ~190 k points in total - fewer than the single
+        955 m grid this replaces, with three times the detail where it is looked at.
+        """
+        return [self._tile(*self._grid(center, half, n), haze_centre=center)
+                for half, n in TERRAIN_LODS]
+
+    @staticmethod
+    def _grid(center, half, n):
+        xs = np.linspace(center[0] - half, center[0] + half, n)
+        ys = np.linspace(center[1] - half, center[1] + half, n)
+        return np.meshgrid(xs, ys)
+
+    def _tile(self, X, Y, haze_centre=None) -> pv.StructuredGrid:
+        """A terrain tile with land cover, hillshade and atmospheric perspective baked in.
+
+        Distance is what tells an operator how far away a ridge is, so the far ground washes
+        toward haze rather than staying as vivid as the ground underfoot. Baking it into the
+        vertex colours costs nothing per frame.
+        """
         Z = self.height(X, Y)
         grid = pv.StructuredGrid(X, Y, Z)
-        grid.point_data["rgb"] = land_cover(X.ravel(order="F"), Y.ravel(order="F"),
-                                            Z.ravel(order="F"))
+        dx = float(abs(X[0, 1] - X[0, 0])) or 1.0
+        dy = float(abs(Y[1, 0] - Y[0, 0])) or 1.0
+        rgb = land_cover(X.ravel(order="F"), Y.ravel(order="F"), Z.ravel(order="F")).astype(float)
+        shade = hillshade(Z, dx, dy).ravel(order="F")[:, None]
+        out = rgb * shade * GROUND_LIFT
+        centre = haze_centre if haze_centre is not None else (X.mean(), Y.mean())
+        d = np.hypot(X.ravel(order="F") - centre[0], Y.ravel(order="F") - centre[1])
+        f = np.clip((d - HAZE_START_M) / (HAZE_FULL_M - HAZE_START_M), 0.0, 1.0)[:, None] ** 0.8
+        grid.point_data["rgb"] = np.clip(out * (1 - f) + HAZE_RGB * f, 0, 255).astype(np.uint8)
         return grid
 
     # ---------------------------------------------------------------- airfield

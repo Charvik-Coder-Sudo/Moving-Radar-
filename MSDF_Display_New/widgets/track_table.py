@@ -7,6 +7,10 @@ same layer switches as the PPI, so the table lists exactly what the PPI draws.
 State values are the packet values, in the RDP's sensor-relative frame
 (x Right, y Forward, z Up). Columns marked * are derived by the display. The
 packets carry no classification and no target id: those show as Unknown and "—".
+
+Two column sets: Essentials, what is read while watching the picture, and All
+columns, which adds the raw packet state. The rows are identical in both - the
+choice hides columns and nothing else.
 """
 
 from __future__ import annotations
@@ -60,6 +64,22 @@ COLUMNS = [
 ]
 COL_CLASS = 2
 COL_SOURCE = 3
+# Twenty-two columns at once is a wall of numbers. ESSENTIALS is what an operator reads while
+# watching the picture: identity, what the sensor sees, and whether the track is current. The
+# raw packet state (x/y/z, velocity, acceleration, turn rate, packet time) is one choice away
+# and nothing is dropped - these are the same rows either way.
+ESSENTIALS = ("Track ID", "Classification", "Source", "Speed* (m/s)", "Range* (m)",
+              "Azimuth* (°)", "Elevation* (°)", "Status*", "Sensors / system", "Age* (s)")
+COLUMN_SETS = (("Essentials", ESSENTIALS), ("All columns", None))
+
+
+def column_indices(names) -> list[int]:
+    """Positions of the named columns in COLUMNS, in table order (all of them when names is
+    None). Hiding columns cannot reorder them, so the order of ESSENTIALS never matters."""
+    if names is None:
+        return list(range(len(COLUMNS)))
+    order = {c[0]: i for i, c in enumerate(COLUMNS)}
+    return sorted(order[n] for n in names)
 
 
 class TrackTableModel(QtCore.QAbstractTableModel):
@@ -150,6 +170,14 @@ class TrackTable(QtWidgets.QWidget):
         h.addWidget(QtWidgets.QLabel("TRACK DETAILS", objectName="ViewTitle"))
         self.count = QtWidgets.QLabel("", objectName="ViewInfo")
         h.addWidget(self.count)
+        self.column_set = QtWidgets.QComboBox()
+        for label, names in COLUMN_SETS:
+            self.column_set.addItem(label, names)
+        self.column_set.setToolTip("Which columns to show. The rows are the same either way: "
+                                   "'All columns' adds the raw packet state.")
+        self.column_set.currentIndexChanged.connect(
+            lambda i: self.set_columns(self.column_set.itemData(i)))
+        h.addWidget(self.column_set)
         h.addStretch(1)
         info = QtWidgets.QLabel("RDP SystemTrack packets · sensor-relative x Right / y Forward / z Up · "
                                 "* derived by the display", objectName="ViewInfo")
@@ -175,6 +203,8 @@ class TrackTable(QtWidgets.QWidget):
         lay.addWidget(self.view, 1)
         self.view.selectionModel().selectionChanged.connect(self._on_select)
 
+        self.set_columns(COLUMN_SETS[0][1])
+
         self._restoring = False
         self._last_update = QtCore.QElapsedTimer()
         self._last_update.start()
@@ -182,6 +212,14 @@ class TrackTable(QtWidgets.QWidget):
         self._views: list = []
         controller.rdp_updated.connect(self.on_rdp)
         controller.layers_changed.connect(lambda: self.on_rdp(self._views, None, force=True))
+
+    def set_columns(self, names):
+        """Show this set of columns. Hiding a column hides nothing about a track: the rows,
+        the sorting and the selection are untouched, and every value stays one choice away."""
+        shown = set(column_indices(names))
+        for i in range(len(COLUMNS)):
+            self.view.setColumnHidden(i, i not in shown)
+        self._sized = False                       # the visible columns need their widths again
 
     def on_rdp(self, views, stats, force=False):
         self._views = views

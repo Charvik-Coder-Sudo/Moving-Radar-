@@ -1,5 +1,51 @@
 # Change log
 
+## 2026-09-29 (3D redesign, increments E and F) - the camera, and the panels around it
+
+No radar mathematics, coordinate convention, fusion logic, RDP packet handling, Scenario Export
+generation or track data was touched. Presentation and interaction only.
+
+### The camera states where it wants to be, and the camera eases there (E)
+- A preset no longer sets the camera once and then translates with the ownship. It re-derives
+  its goal every frame and the camera closes the gap over `CAMERA_EASE_TAU` (0.30 s), so a
+  change of preset reads as a movement rather than a cut, and the chase view swings round
+  behind the aircraft as it turns instead of ending up side-on.
+  **Not exercised by this scenario**: every platform in it flies a straight line - the ownship
+  holds 65 deg for all 814 s and no target changes heading by more than 1.5 deg. The swing is
+  covered by unit tests (`chase_pose` round the compass), not by this data.
+- Auto-framing on the tactical overview: the distance comes from the ownship, the selection and
+  the drawn objects within the range the rings cover, instead of a fixed 60 km. Held through a
+  6 % deadband so the view does not breathe in and out as a target drifts.
+- The wheel zooms the preset (0.15x - 12x) instead of dollying out of it; a drag hands the
+  camera to the operator and says so; Follow, or a preset, takes it back.
+- The camera geometry is now pure, module-level and tested: `ease_alpha`, `chase_pose`,
+  `bounds_centre`, `framing_distance`, `deadbanded`.
+- Near and far planes are no longer recomputed every frame (measured at 2.2 ms), only when the
+  camera is travelling, when its distance changes, and once a second regardless.
+- Metre-scale ground clutter - trees, houses, masts, runway lights - is drawn only below 4 km
+  camera height. Above that it was speckle on the terrain. Previously only the trees faded.
+- The operator legend and the HUD carry their own plate: they were barely legible against a
+  bright sky.
+
+### The panels say what they are (F)
+- The fifteen display layers are grouped into six folding sections - OWNSHIP, TRUTH TARGETS,
+  RDP TRACKS, SENSORS, LABELS & VECTORS, SCENE - each with one switch that reports the group
+  (on, off, or partly on) and turns all of it on or off. The groups cover every layer exactly
+  once, and a test fails if a new layer is ever left out of the panel.
+- The 3D camera controls appear in the sidebar beside the view buttons, in step with the 3D
+  toolbar in both directions, and disabled while the 2D view is up.
+- Header: one compact row. The live state and the UDP address are no longer repeated there -
+  the status line directly below reports both, from the packet timing. A sidebar toggle was
+  added to it.
+- The view and page buttons are rows rather than stacked, so the layer switches get the height.
+- Track Details opens on ten essential columns with the full twenty-two one choice away. The
+  rows are identical either way: the choice hides columns and nothing else.
+
+### Verified
+188 unit tests, `gui_smoke` 13/13, and three live end-to-end suites against replayed RDP
+packets: 3D interaction 24/24, camera behaviour 17/17, GUI 33/33. The automatic camera costs
++0.03 ms per frame, measured as four alternating on/off pairs in one process.
+
 ## 2026-09-25 (deployment) - installable and runnable on a clean machine
 
 No radar mathematics, fusion logic, RDP packet handling, Scenario Export generation, coordinate

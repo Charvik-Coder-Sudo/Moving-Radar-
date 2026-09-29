@@ -62,7 +62,11 @@
     "ppi_range_m": 150000.0,
     "terrain_extent_m": 400000.0,
     "grid_spacing_m": 10000.0,
-    "depth_peeling": false
+    "depth_peeling": false,
+    "quality_comment": "3D rendering quality. anti_aliasing: fxaa (cheap), ssaa (sharper, ~4x the cost) or false. ambient_occlusion seats objects on the ground. shadows are the expensive one (measured +6 ms/frame) and are off by default.",
+    "anti_aliasing": "fxaa",
+    "ambient_occlusion": true,
+    "shadows": false
   },
   "layers": {
     "show_ownship": true,

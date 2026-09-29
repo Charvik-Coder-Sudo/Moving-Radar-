@@ -29,6 +29,11 @@ QStatusBar { background: #070d18; color: #94a3b8; }
              color: #cbd5e1; }
 #NavButton:checked { background: #0e3a58; border-color: #38bdf8; color: #f0f9ff; }
 #NavButton:hover { border-color: #475569; }
+/* the same button in a row: the fixed part of the sidebar stays short so the pages get the height */
+#NavTab { text-align: center; padding: 4px 6px; background: #0f1a2e; border: 1px solid #1e293b;
+          color: #cbd5e1; }
+#NavTab:checked { background: #0e3a58; border-color: #38bdf8; color: #f0f9ff; }
+#NavTab:hover { border-color: #475569; }
 #Sep { color: #1e293b; }
 
 #ViewToolbar { background: #0d172a; border-bottom: 1px solid #1e293b; }
@@ -36,6 +41,11 @@ QStatusBar { background: #070d18; color: #94a3b8; }
 #ViewInfo { color: #64748b; background: transparent; }
 #PanelTitle { color: #7dd3fc; font-weight: 700; letter-spacing: 1px; padding: 4px 0; }
 #SectionLabel { color: #64748b; font-size: 8pt; font-weight: 700; padding-top: 4px; }
+/* a folding group of layer switches: the title folds it, the box switches the whole group */
+#SectionTitle { text-align: left; background: transparent; border: none; color: #94a3b8;
+                font-size: 8pt; font-weight: 700; letter-spacing: 1px; padding: 3px 2px; }
+#SectionTitle:hover { color: #e2e8f0; }
+#GroupSwitch { spacing: 0; }
 #FieldName { color: #94a3b8; }
 #FieldValue { color: #e2e8f0; font-family: Consolas; qproperty-alignment: 'AlignRight|AlignVCenter'; }
 #FieldUnit { color: #64748b; }

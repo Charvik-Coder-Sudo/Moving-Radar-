@@ -1,0 +1,94 @@
+ .gitignore                                         |    4 [32m+[m
+ MSDF_Display_New/.gitignore                        |   25 [32m+[m
+ MSDF_Display_New/CHANGELOG.md                      |  359 [32m++++++[m
+ MSDF_Display_New/README.md                         |  300 [32m+++++[m
+ MSDF_Display_New/assets/aircraft/README.txt        |   12 [32m+[m
+ MSDF_Display_New/assets/aircraft_background.wav    |  Bin [31m0[m -> [32m705644[m bytes
+ MSDF_Display_New/config/display_config.json        |   96 [32m++[m
+ MSDF_Display_New/data/README.md                    |   38 [32m+[m
+ MSDF_Display_New/data_loader/__init__.py           |    0
+ MSDF_Display_New/data_loader/scenario_export.py    |  390 [32m++++++[m
+ MSDF_Display_New/docs/COORDINATE_AND_ATTITUDE.md   |  294 [32m+++++[m
+ MSDF_Display_New/docs/INSTALLATION.md              |  210 [32m++++[m
+ MSDF_Display_New/docs/MSDF_DISPLAY_ARCHITECTURE.md |  574 [32m+++++++++[m
+ .../docs/MSDF_DISPLAY_CPP_QT_DESIGN.md             |  611 [32m+++++++++[m
+ MSDF_Display_New/docs/RDP_INTEGRATION.md           |  207 [32m+++[m
+ .../docs/existing_codebase_analysis.md             |  136 [32m++[m
+ MSDF_Display_New/environment.py                    |  127 [32m++[m
+ MSDF_Display_New/launcher.py                       |   79 [32m++[m
+ MSDF_Display_New/logging_setup.py                  |   68 [32m+[m
+ MSDF_Display_New/main.py                           |  213 [32m++++[m
+ MSDF_Display_New/models/__init__.py                |    0
+ MSDF_Display_New/models/ownship_state.py           |   95 [32m++[m
+ MSDF_Display_New/models/sensor_state.py            |  197 [32m+++[m
+ MSDF_Display_New/models/track_state.py             |   86 [32m++[m
+ MSDF_Display_New/msdf_math/__init__.py             |   14 [32m+[m
+ MSDF_Display_New/msdf_math/attitude.py             |   94 [32m++[m
+ MSDF_Display_New/msdf_math/coordinates.py          |   95 [32m++[m
+ MSDF_Display_New/msdf_math/kinematics.py           |  137 [32m++[m
+ MSDF_Display_New/msdf_math/motion.py               |  177 [32m+++[m
+ MSDF_Display_New/paths.py                          |  128 [32m++[m
+ MSDF_Display_New/processing/__init__.py            |    0
+ MSDF_Display_New/processing/frame.py               |   76 [32m++[m
+ MSDF_Display_New/processing/scenario_processor.py  |  181 [32m+++[m
+ MSDF_Display_New/processing/track_projection.py    |   96 [32m++[m
+ MSDF_Display_New/pyproject.toml                    |   43 [32m+[m
+ MSDF_Display_New/rdp/__init__.py                   |    6 [32m+[m
+ MSDF_Display_New/rdp/packet.py                     |   97 [32m++[m
+ MSDF_Display_New/rdp/receiver.py                   |  197 [32m+++[m
+ MSDF_Display_New/rdp/track_store.py                |  206 [32m+++[m
+ MSDF_Display_New/requirements.txt                  |   22 [32m+[m
+ MSDF_Display_New/run_linux.sh                      |   49 [32m+[m
+ MSDF_Display_New/run_macos.sh                      |   40 [32m+[m
+ MSDF_Display_New/run_windows.bat                   |   47 [32m+[m
+ MSDF_Display_New/setup_linux.sh                    |  114 [32m++[m
+ MSDF_Display_New/setup_macos.sh                    |  113 [32m++[m
+ MSDF_Display_New/setup_windows.bat                 |  121 [32m++[m
+ MSDF_Display_New/tests/__init__.py                 |    0
+ MSDF_Display_New/tests/gui_smoke.py                |  132 [32m++[m
+ MSDF_Display_New/tests/test_attitude.py            |  213 [32m++++[m
+ MSDF_Display_New/tests/test_display_style.py       |  119 [32m++[m
+ MSDF_Display_New/tests/test_existing_compat.py     |  118 [32m++[m
+ MSDF_Display_New/tests/test_live.py                |  163 [32m+++[m
+ MSDF_Display_New/tests/test_math.py                |  119 [32m++[m
+ MSDF_Display_New/tests/test_motion.py              |  158 [32m+++[m
+ MSDF_Display_New/tests/test_ppi_trails.py          |  198 [32m+++[m
+ MSDF_Display_New/tests/test_rdp.py                 |  151 [32m+++[m
+ MSDF_Display_New/tests/test_receiver.py            |  106 [32m++[m
+ MSDF_Display_New/tests/test_scenario_export.py     |  108 [32m++[m
+ MSDF_Display_New/tests/test_scenery.py             |  134 [32m++[m
+ MSDF_Display_New/tests/test_track_projection.py    |  147 [32m+++[m
+ MSDF_Display_New/tests/test_track_store.py         |  169 [32m+++[m
+ MSDF_Display_New/tests/test_track_visuals.py       |  135 [32m++[m
+ MSDF_Display_New/verify_installation.py            |  213 [32m++++[m
+ MSDF_Display_New/visualization/__init__.py         |    0
+ MSDF_Display_New/visualization/aircraft_model.py   |  166 [32m+++[m
+ MSDF_Display_New/visualization/aircraft_ppi.py     |  433 [32m+++++++[m
+ MSDF_Display_New/visualization/hover.py            |  253 [32m++++[m
+ MSDF_Display_New/visualization/scan_beam.py        |   64 [32m+[m
+ MSDF_Display_New/visualization/scenery.py          |  409 [32m++++++[m
+ MSDF_Display_New/visualization/sensor_coverage.py  |  120 [32m++[m
+ MSDF_Display_New/visualization/style.py            |  146 [32m+++[m
+ MSDF_Display_New/visualization/symbols.py          |  156 [32m+++[m
+ MSDF_Display_New/visualization/tracks_2d.py        |  247 [32m++++[m
+ MSDF_Display_New/visualization/tracks_3d.py        |   82 [32m++[m
+ MSDF_Display_New/visualization/view_2d.py          |  412 [32m++++++[m
+ MSDF_Display_New/visualization/view_3d.py          | 1304 [32m+++++++++++++++++++[m
+ MSDF_Display_New/visualization/view_controller.py  |  386 [32m++++++[m
+ MSDF_Display_New/widgets/__init__.py               |    0
+ MSDF_Display_New/widgets/aircraft_audio.py         |  123 [32m++[m
+ MSDF_Display_New/widgets/legend_widget.py          |   67 [32m+[m
+ MSDF_Display_New/widgets/main_window.py            |  432 [32m+++++++[m
+ MSDF_Display_New/widgets/navigation_panel.py       |  182 [32m+++[m
+ MSDF_Display_New/widgets/ownship_panel.py          |  112 [32m++[m
+ MSDF_Display_New/widgets/popout.py                 |  144 [32m+++[m
+ MSDF_Display_New/widgets/rdp_status.py             |  129 [32m++[m
+ MSDF_Display_New/widgets/sensor_panel.py           |  106 [32m++[m
+ MSDF_Display_New/widgets/theme.py                  |   80 [32m++[m
+ MSDF_Display_New/widgets/track_table.py            |  218 [32m++++[m
+ Scenario_Export/IFF/IFF_Replies.csv                |  664 [32m++++++++++[m
+ Scenario_Export/IFF/Secondary_Radar_IFF.csv        | 1327 [32m++++++++++++++++++++[m
+ .../Sensor_Properties/sensor_properties.csv        |    3 [32m+[m
+ .../Sensor_Properties/sensor_properties.json       |   48 [32m+[m
+ .../Sensor_Properties/sensor_properties.xlsx       |  Bin [31m0[m -> [32m5206[m bytes
+ 93 files changed, 16370 insertions(+)

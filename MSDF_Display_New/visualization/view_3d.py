@@ -2,6 +2,12 @@
 
 Scene, all in world ENU metres (+X East, +Y North, +Z Up), at the displayed time
 (live: the packet time; replay: the export timeline):
+Two modes, one scene: OPERATOR draws the situation - terrain, ownship, targets, tracks,
+coverage and the live beam. DEBUG adds the engineering geometry over it: the ENU grid and
+axes, radar boresights, the beam's azimuth column and axis, the model's body axes, the
+exported velocity vector and the full symbol / classification legend. Nothing diagnostic is
+drawn by default.
+
     ground context    artificial terrain relief, an airfield (runway, markings, lights,
                       taxiway, apron, hangars, control tower), settlements, masts, roads
                       and woodland - visualization.scenery, deterministic, part of no
@@ -68,23 +74,62 @@ CAMERA_PRESETS = (("Tactical overview", "tactical", "O"), ("Ownship chase", "cha
                   ("Top", "top", "T"), ("Side", "side", "S"), ("Rear", "rear", "B"),
                   ("North-up", "northup", "N"))
 FOLLOW_SMOOTHING = 0.25                # camera easing towards the followed object (1.0 = rigid)
+# Camera dynamics. An automatic camera never sets the camera outright: it states where it wants
+# to be for the current frame (its goal), and the camera closes that gap over CAMERA_EASE_TAU.
+# So a turn swings the view round behind the aircraft instead of leaving it side-on, and a
+# change of preset reads as a movement. Dragging hands control straight back to the operator.
+CAMERA_EASE_TAU = 0.30                 # s to close ~63 % of the gap to the goal
+CAMERA_SNAP_M = 1.5                    # closer than this, the goal is simply taken
+CAMERA_STEP_MS = 16                    # transition tick, running only while one is outstanding
+CAMERA_TRANSITION_MS = 1200            # a transition is carried this long at most, then the
+                                       # arriving frames are the only thing that moves the camera
+CLIPPING_REFRESH_MS = 1000             # how often the near / far planes are recomputed while
+                                       # the camera is merely holding its place (see _refresh_clipping)
+CAMERA_ZOOM_STEP = 0.85                # one wheel notch, about the camera's own distance
+CAMERA_ZOOM_LIMITS = (0.15, 12.0)
+VIEW_ANGLE_DEG = 40.0                  # vertical field of view
+# Auto-framing: hold the ownship and the objects that matter inside the picture, instead of a
+# fixed distance that leaves an aircraft a speck at the edge of the screen. What counts as
+# near enough to matter is the range the rings cover (set with RANGE_RINGS_M below): those
+# rings are what the operator reads distance against, so the picture holds what they span.
+FRAME_FILL = 0.62                      # of the half-view that the framed objects should fill
+FRAME_DEADBAND = 0.06                  # ignore smaller framing changes, so the view stops hunting
 
 # Operator palette: a dark atmospheric environment that stays behind the tracks.
-SKY_TOP = "#0d1e35"                    # zenith
+SKY_TOP = "#1b3557"                    # zenith: daylight, matched to the lit ground
 SKY_HORIZON = "#5a748f"                # daylight haze: the scene fades into it with distance
-GROUND_COLOR = "#2c3a2c"               # ground beyond the terrain patch
+GROUND_COLOR = "#76889c"               # beyond the terrain tiles: haze, not a green slab
 GRID_COLOR = "#42556b"                 # restrained world grid
 RANGE_RING_COLOR = "#7d94ab"           # ground range rings around the ownship
 RANGE_TEXT_COLOR = "#c3d2e0"
 AIRCRAFT_LENGTH_M = 15.0
-MIN_AIRCRAFT_ANGULAR_SIZE = 0.05
+# An aircraft must stay readable at any camera distance: never smaller than this fraction of
+# the distance to it. The ownship is drawn a little larger again - it is the platform.
+MIN_AIRCRAFT_ANGULAR_SIZE = 0.075
+OWNSHIP_ANGULAR_SIZE = 0.095
 AXIS_COLOR = "#94a3b8"                 # neutral slate, never a classification colour
 # DEBUG-only colours: distinct from every classification and sensor colour
 BODY_AXIS_COLORS = {"F": "#22d3ee", "R": "#fb923c", "U": "#c084fc"}   # Forward / Right / Up
 EXPORTED_VECTOR_COLOR = "#f472b6"      # exported velocity, shown beside the flown path in DEBUG
 BODY_AXIS_LENGTH = 1.8                 # in aircraft lengths
 TRACK_COURSE_ALPHA = 0.25              # smoothing of a live track's heading (1.0 = none)
+# Rendering quality. Costs measured on the reference machine (Intel iGPU, 1240x780 viewport):
+# FXAA +0.4 ms, SSAO +0.2 ms, PBR +0.7 ms, shadow maps +6.0 ms per frame.
+# Mostly dielectric: a metallic surface mirrors its surroundings, and with no environment
+# map to mirror it simply goes dark against a bright landscape.
+AIRCRAFT_METALLIC, AIRCRAFT_ROUGHNESS = 0.08, 0.38
+SSAO_RADIUS_M, SSAO_BIAS_M = 900.0, 30.0
+# Sensor geometry is context, not the subject: it must never compete with an aircraft.
+COVERAGE_OPACITY, COVERAGE_EDGE_OPACITY = 0.022, 0.16
+BEAM_OPACITY = 0.40
+RANGE_RING_OPACITY = 0.32
+DETAIL_CEILING_M = 4_000.0      # above this camera height the metre-scale ground clutter is
+                                # speckle, not scenery (the land cover baked into the terrain,
+                                # the runway and the roads carry the picture) - _build_scenery
+MAX_ALWAYS_LABELLED = 6         # beyond this many targets, only the selected one is named
+OWN_TRAIL_WIDTH = 1.6
 RANGE_RINGS_M = (25_000.0, 50_000.0, 100_000.0, 150_000.0)
+FRAME_RELEVANT_M = RANGE_RINGS_M[-1]   # auto-framing reaches as far as the rings do
 
 
 # ----------------------------------------------------------------------------
@@ -164,6 +209,57 @@ def stacked_offsets(sx, sy, front):
 
 
 # ----------------------------------------------------------------------------
+# camera geometry (pure: no renderer, no state - View3D applies these)
+# ----------------------------------------------------------------------------
+
+def ease_alpha(dt_s: float, tau_s: float = CAMERA_EASE_TAU) -> float:
+    """Fraction of the remaining gap to close in dt. Exponential, so the motion is
+    frame-rate independent: the same wall-clock time gives the same approach at any fps."""
+    if dt_s <= 0.0 or tau_s <= 0.0:
+        return 1.0
+    return float(1.0 - np.exp(-dt_s / tau_s))
+
+
+def bounds_centre(points) -> np.ndarray:
+    """Centre of the bounding box of world points (not the mean: one distant object must not
+    drag the centre away from a cluster)."""
+    pts = np.asarray(points, float).reshape(-1, 3)
+    return 0.5 * (pts.min(axis=0) + pts.max(axis=0))
+
+
+def framing_distance(points, centre, view_angle_deg: float = VIEW_ANGLE_DEG,
+                     fill: float = FRAME_FILL) -> float:
+    """Distance from ``centre`` at which every point lies inside ``fill`` of the half-view.
+
+    The vertical field of view is the tighter of the two on any normal viewport, so framing
+    to it frames horizontally as well."""
+    pts = np.asarray(points, float).reshape(-1, 3)
+    if len(pts) < 2:
+        return 0.0
+    radius = float(np.max(np.linalg.norm(pts - np.asarray(centre, float), axis=1)))
+    half = np.tan(np.radians(0.5 * view_angle_deg)) * fill
+    return radius / max(half, 1e-6)
+
+
+def deadbanded(held, want: float, band: float = FRAME_DEADBAND) -> float:
+    """``want``, unless it is within ``band`` of the value already held - then hold that.
+    Without this the auto-framed view breathes in and out as a target drifts."""
+    if held is None or abs(want - held) > band * abs(held):
+        return float(want)
+    return float(held)
+
+
+def chase_pose(position, heading_deg: float, distance: float):
+    """(camera position, focal point, up) behind and above an aircraft on ``heading_deg``,
+    looking along its heading. Heading is compass degrees, as the aircraft is drawn."""
+    psi = np.radians(heading_deg)
+    fwd = np.array([np.sin(psi), np.cos(psi), 0.0])
+    p = np.asarray(position, float)
+    return (p - fwd * distance + np.array([0.0, 0.0, 0.32 * distance]),
+            p + fwd * distance * 0.9, (0, 0, 1))
+
+
+# ----------------------------------------------------------------------------
 # camera interaction
 # ----------------------------------------------------------------------------
 
@@ -201,6 +297,10 @@ class ModeStyle(vtkInteractorStyleTrackballCamera):
 # ----------------------------------------------------------------------------
 
 class View3D(QtWidgets.QWidget):
+    # the camera a preset has just taken up, by key. Emitted whenever one is applied, so a
+    # second set of controls follows the event itself rather than a combo box changing value
+    camera_changed = QtCore.Signal(str)
+
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         self.ctrl = controller
@@ -234,6 +334,22 @@ class View3D(QtWidgets.QWidget):
         self._last_follow_pos = None
         self._hover_clock = QtCore.QElapsedTimer()
         self._hover_clock.start()
+
+        # automatic camera: a live preset re-derives its goal every frame, the camera eases
+        # towards it, and the operator takes over the moment they drag
+        self._cam_mode = None             # live preset key, None = the operator has the camera
+        self._cam_goal = None             # (position, focal, up) being eased towards
+        self._cam_zoom = 1.0              # wheel adjustment about the preset's own distance
+        self._frame_dist = None           # accepted auto-framing distance (FRAME_DEADBAND)
+        self._cam_clock = QtCore.QElapsedTimer()
+        self._cam_clock.start()
+        self._cam_ticks = 0               # remaining ticks of the current transition
+        self._clip_dist = 0.0             # camera distance the near / far planes were set for
+        self._clip_clock = QtCore.QElapsedTimer()
+        self._clip_clock.start()
+        self._cam_timer = QtCore.QTimer(self)
+        self._cam_timer.setInterval(CAMERA_STEP_MS)
+        self._cam_timer.timeout.connect(self._cam_tick)
 
         controller.frame_ready.connect(self.on_frame)
         controller.data_loaded.connect(lambda *_: self.request_build())
@@ -282,7 +398,10 @@ class View3D(QtWidgets.QWidget):
             h.addWidget(b)
         h.addSpacing(10)
         self.follow_btn = QtWidgets.QToolButton(text="Follow", checkable=True, checked=True)
-        self.follow_btn.setToolTip("Keep the camera attached to the ownship (the world never rotates)")
+        self.follow_btn.setToolTip("Keep the camera on the ownship, framing it automatically.\n"
+                                  "Off, or after a drag, the camera is yours (the world never rotates).")
+        # clicked, not toggled: the presets set this button themselves
+        self.follow_btn.clicked.connect(self._on_follow_clicked)
         h.addWidget(self.follow_btn)
         self.preset_box = QtWidgets.QComboBox()
         for label, key, shortcut in CAMERA_PRESETS:
@@ -340,18 +459,29 @@ class View3D(QtWidgets.QWidget):
             pos = self.ctrl.scenario.ownship.pos
             track = (pos[0], pos[-1])                 # the airfield is placed on the ground track
         self.scenery = scenery.Scenery(lo=np.asarray(lo3, float), hi=np.asarray(hi3, float), track=track)
-        p.add_mesh(pv.Disc(center=(center[0], center[1], -5.0), inner=0, outer=extent * 2.5,
+        p.add_mesh(pv.Disc(center=(center[0], center[1], -60.0), inner=0, outer=extent * 3.0,
                            c_res=96, r_res=2),
                    color=GROUND_COLOR, name="horizon_ground", lighting=False, specular=0.0)
-        p.add_mesh(self.scenery.terrain(center, extent), scalars="rgb", rgb=True, name="terrain",
-                   show_scalar_bar=False, smooth_shading=True, ambient=0.25, diffuse=0.62, specular=0.0)
-        p.add_mesh(build_enu_grid(self.scenery.height, center, extent,
-                                  float(disp.get("grid_spacing_m", 10000.0))),
-                   color=GRID_COLOR, opacity=0.22, line_width=1, name="enu_grid")
+        # Terrain in three concentric tiles: fine under the aircraft, cheap at the horizon.
+        # The vertex colours already carry land cover and hillshade (visualization.scenery).
+        first = self.ctrl.current_frame.ownship.position[:2] if (
+            self.ctrl.current_frame is not None and self.ctrl.current_frame.ownship is not None
+        ) else center[:2]
+        self._terrain_center = np.asarray(first, float)
+        self.terrain_meshes = self.scenery.terrain_lods(self._terrain_center)
+        self.terrain_actors = [
+            p.add_mesh(mesh, scalars="rgb", rgb=True, name=f"terrain_{i}", show_scalar_bar=False,
+                       smooth_shading=True, ambient=0.45, diffuse=0.85, specular=0.0)
+            for i, mesh in enumerate(self.terrain_meshes)]
+        self.debug_props: list = []          # engineering geometry: hidden unless DEBUG is on
+        self.debug_props.append(
+            p.add_mesh(build_enu_grid(self.scenery.height, center, extent,
+                                      float(disp.get("grid_spacing_m", 10000.0))),
+                       color=GRID_COLOR, opacity=0.22, line_width=1, name="enu_grid"))
         self._build_scenery(p)
         # range rings around the ownship: scale and depth reference (moved, never rebuilt)
-        self.rings = p.add_mesh(ground_rings(), scalars="rgb", rgb=True, opacity=0.55, line_width=1.2,
-                                name="range_rings", show_scalar_bar=False)
+        self.rings = p.add_mesh(ground_rings(), scalars="rgb", rgb=True, opacity=RANGE_RING_OPACITY,
+                                line_width=1.0, name="range_rings", show_scalar_bar=False)
         self.ring_labels = []
         for r in RANGE_RINGS_M:
             a = vtkBillboardTextActor3D()
@@ -366,13 +496,18 @@ class View3D(QtWidgets.QWidget):
         self._add_world_axes(center, extent)
         p.add_axes(xlabel="E", ylabel="N", zlabel="U", line_width=2, labels_off=False,
                    x_color=AXIS_COLOR, y_color=AXIS_COLOR, z_color=AXIS_COLOR)
+        self.orientation_widget = getattr(p, "renderer", None) and p.renderer.axes_widget
         self._add_lights(p)
+        self._apply_quality(p)
 
         # --- ownship ------------------------------------------------------
         mesh, self.aircraft_source = load_aircraft()
         self.aircraft = p.add_mesh(mesh, scalars="rgb", rgb=True, name="ownship",
-                                   show_scalar_bar=False, smooth_shading=True, specular=0.4)
-        self.own_trail = MeshLayer(p, "own_trail", rgb=False, color=style.OWNSHIP_COLOR, line_width=2.0)
+                                   show_scalar_bar=False, smooth_shading=True,
+                                   pbr=True, metallic=AIRCRAFT_METALLIC,
+                                   roughness=AIRCRAFT_ROUGHNESS)
+        self.own_trail = MeshLayer(p, "own_trail", rgb=False, color=style.OWNSHIP_COLOR,
+                                   line_width=OWN_TRAIL_WIDTH, opacity=0.85)
         self.own_vel = MeshLayer(p, "own_vel", rgb=False, color=style.VELOCITY_COLOR, line_width=2.5)
         self.own_acc = MeshLayer(p, "own_acc", rgb=False, color=style.ACCELERATION_COLOR, line_width=2.5)
         # DEBUG: the model's own axes, and the exported velocity next to the flown path
@@ -389,15 +524,16 @@ class View3D(QtWidgets.QWidget):
             col = self.palette.sensor_color(cfg.sensor_id)
             beam_col = self.palette.beam_color(cfg.sensor_id)
             # field of regard: a volume you can see through; never competes with the beam
-            cov = p.add_mesh(surf, color=col, opacity=0.035, name=f"cov_{cfg.sensor_id}",
+            cov = p.add_mesh(surf, color=col, opacity=COVERAGE_OPACITY, name=f"cov_{cfg.sensor_id}",
                              lighting=False, show_edges=False)
             edges = p.add_mesh(polylines(sensor_coverage.coverage_edges_frd(cfg, rng),
                                          [style.hex_to_rgb(col)] * 8),
-                               scalars="rgb", rgb=True, opacity=0.28, line_width=1.0,
-                               name=f"cov_edges_{cfg.sensor_id}", show_scalar_bar=False)
+                               scalars="rgb", rgb=True, opacity=COVERAGE_EDGE_OPACITY,
+                               line_width=1.0, name=f"cov_edges_{cfg.sensor_id}",
+                               show_scalar_bar=False)
             beam_mesh = pv.PolyData(np.zeros((5, 3)), faces=np.array([3, 0, 1, 2]))
-            beam = p.add_mesh(beam_mesh, color=beam_col, opacity=0.62, name=f"beam_{cfg.sensor_id}",
-                              lighting=False)
+            beam = p.add_mesh(beam_mesh, color=beam_col, opacity=BEAM_OPACITY,
+                              name=f"beam_{cfg.sensor_id}", lighting=False)
             col_mesh = pv.PolyData(np.zeros((3, 3)), faces=np.array([3, 0, 1, 2]))
             column = p.add_mesh(col_mesh, color=beam_col, opacity=0.05, name=f"beamcol_{cfg.sensor_id}",
                                 lighting=False)
@@ -405,6 +541,7 @@ class View3D(QtWidgets.QWidget):
             axis = p.add_mesh(axis_mesh, color=beam_col, line_width=2.0, name=f"beamaxis_{cfg.sensor_id}")
             bore = p.add_mesh(pv.PolyData(np.array([[0, 0, 0], [rng, 0, 0]], float), lines=np.array([2, 0, 1])),
                               color=col, line_width=1.2, opacity=0.5, name=f"bore_{cfg.sensor_id}")
+            self.debug_props += [bore, column, axis]      # boresight, azimuth column, beam axis
             self.sensor_actors[cfg.sensor_id] = dict(
                 cfg=cfg, rng=rng, cov=cov, edges=edges, beam=beam, beam_mesh=beam_mesh,
                 column=column, col_mesh=col_mesh, axis=axis, axis_mesh=axis_mesh, bore=bore)
@@ -438,12 +575,20 @@ class View3D(QtWidgets.QWidget):
         # --- HUD ----------------------------------------------------------
         self.hud = p.add_text(" ", position="upper_left", font_size=8, color="#e2e8f0",
                               font="courier", shadow=True, name="hud")
+        # the readout sits over sky as often as over ground: give it its own plate so it is
+        # legible either way, rather than depending on what is behind it
+        hud_tp = self.hud.GetTextProperty() if hasattr(self.hud, "GetTextProperty") else None
+        if hud_tp is not None:
+            hud_tp.SetBackgroundColor(0.004, 0.012, 0.035)
+            hud_tp.SetBackgroundOpacity(0.55)
         self._add_legend(ren)
 
         self._scene_built = True
         self._needs_build = False
+        self._apply_debug_visibility()
         self._last_follow_pos = None
         self.apply_camera(self._pending_camera)
+        self._finish_transition()    # the first view is not a fly-in from VTK's default camera
         if self.ctrl.current_frame is not None:
             self.render_frame(self.ctrl.current_frame)
 
@@ -456,16 +601,23 @@ class View3D(QtWidgets.QWidget):
         return "#38bdf8"
 
     def _add_legend(self, ren):
-        """Top-right legend: what this world view shows and where it comes from."""
-        grey = "#5f7386"
-        lines = [("SENSOR TRACKS  [ ] square", grey),
-                 ("  Primary  larger square", style.TYPE_ICON_COLOR),
-                 ("  Secondary  smaller square", style.TYPE_ICON_COLOR),
-                 ("SYSTEM TRACK  /\\ triangle", grey),
-                 ("  fused (larger, brighter)", style.TYPE_ICON_COLOR),
-                 ("TARGETS", grey), ("  truth aircraft (colour = Auth)", style.class_color("UNKNOWN")),
-                 ("COLOUR = CLASSIFICATION", grey)]
-        lines += [(f"  {c.label}", c.color) for c in style.CLASSIFICATIONS.values()]
+        """Top-right legend: what this world view shows and where it comes from.
+
+        It sits over whatever the view happens to be showing - dark terrain one moment, bright
+        sky the next - so it carries its own near-opaque plate and light text rather than
+        relying on the scene behind it to be dark."""
+        grey = "#b6c5d4"
+        # Operator legend: four lines, the minimum needed to read the picture. The
+        # classification swatches and the primary / secondary distinction are engineering
+        # detail and appear only in DEBUG (they are also in the left panel legend).
+        lines = [("[ ] sensor track", style.TYPE_ICON_COLOR),
+                 ("/\\ fused system track", style.TYPE_ICON_COLOR),
+                 ("aircraft = truth target", style.class_color("UNKNOWN")),
+                 ("colour = classification", grey)]
+        self.debug_legend_from = len(lines)
+        lines += [("PRIMARY larger square", style.TYPE_ICON_COLOR),
+                  ("SECONDARY smaller square", style.TYPE_ICON_COLOR)]
+        lines += [(f"{c.label}", c.color) for c in style.CLASSIFICATIONS.values()]
         self.legend_actors = []
         # font sizes are points (pyvistaqt sets the render window DPI); spacing in device pixels
         line_px = 1.45 * 12 * self.plotter.ren_win.GetDPI() / 72.0
@@ -483,8 +635,8 @@ class View3D(QtWidgets.QWidget):
             tp.SetBold(text.strip() == text and text.isupper())
             tp.SetShadow(False)
             tp.SetBackgroundColor(0.004, 0.012, 0.035)
-            tp.SetBackgroundOpacity(0.45)
-            tp.SetOpacity(0.85)
+            tp.SetBackgroundOpacity(0.78)
+            tp.SetOpacity(1.0)
             tp.SetJustificationToRight()
             tp.SetVerticalJustificationToTop()
             tp.SetColor(*style.rgb01(colour))
@@ -499,8 +651,9 @@ class View3D(QtWidgets.QWidget):
     def _add_lights(p):
         """Sun, sky fill and a weak bounce: relief reads, the aircraft never goes black."""
         p.remove_all_lights()
-        sun = pv.Light(position=(0.55, -0.35, 0.75), focal_point=(0, 0, 0), color="#fff2dc",
-                       intensity=1.05, light_type="scene light")
+        # the same direction the terrain hillshade is baked from, so relief and objects agree
+        sun = pv.Light(position=scenery.SUN_DIRECTION, focal_point=(0, 0, 0), color="#fff2dc",
+                       intensity=1.35, light_type="scene light")
         sun.positional = False
         sky = pv.Light(position=(-0.45, 0.6, 0.65), focal_point=(0, 0, 0), color="#b9cfe8",
                        intensity=0.45, light_type="scene light")
@@ -511,6 +664,39 @@ class View3D(QtWidgets.QWidget):
         for lt in (sun, sky, bounce):
             p.add_light(lt)
 
+    def _apply_quality(self, p):
+        """Depth cues that make the scene read as space rather than as a diagram.
+
+        FXAA removes the crawling edges that made thin track lines look like a plot; SSAO
+        darkens the contact between objects and ground so aircraft sit in the world instead of
+        floating over it; the aircraft use physically based materials so their shape is legible
+        against both sky and terrain. Shadow maps cost about eight times SSAO here and are left
+        to the configuration.
+        """
+        disp = self.cfg.get("display", {})
+        try:
+            if disp.get("anti_aliasing", "fxaa"):
+                p.enable_anti_aliasing(str(disp.get("anti_aliasing", "fxaa")))
+        except Exception as exc:                           # noqa: BLE001 - quality is optional
+            self._log_quality("anti-aliasing", exc)
+        try:
+            if disp.get("ambient_occlusion", True):
+                p.enable_ssao(radius=SSAO_RADIUS_M, bias=SSAO_BIAS_M, kernel_size=64, blur=True)
+        except Exception as exc:                           # noqa: BLE001
+            self._log_quality("ambient occlusion", exc)
+        if disp.get("shadows", False):
+            try:
+                p.enable_shadows()
+            except Exception as exc:                       # noqa: BLE001
+                self._log_quality("shadows", exc)
+
+    @staticmethod
+    def _log_quality(what, exc):
+        import logging
+        logging.getLogger("msdf").warning(
+            "3D view: %s is not available on this graphics stack (%s: %s); "
+            "the view runs without it", what, type(exc).__name__, exc)
+
     def _build_scenery(self, p):
         """Airfield, settlements, masts, roads and woodland: one actor per group, built once.
 
@@ -518,17 +704,27 @@ class View3D(QtWidgets.QWidget):
         be switched off (Display Layers -> Show Scenery) for a plain engineering picture."""
         w = self.scenery
         self.scenery_actors = []
+        # Metre-scale objects: trees, houses, masts, runway lights. Close to the ground they
+        # are the scenery; from cruise altitude they are speckle on the terrain, so they are
+        # kept for the approach and dropped above DETAIL_CEILING_M. The land cover baked into
+        # the terrain, the runway itself and the roads carry the picture at height.
+        self.detail_actors = []
         edge_lights, approach_lights = w.runway_lights()
-        for name, mesh, kw in (
-                ("airfield", w.airfield_surfaces(), dict(ambient=0.35, diffuse=0.55, specular=0.0)),
-                ("airfield_buildings", w.airfield_buildings(), dict(ambient=0.3, diffuse=0.75, specular=0.05)),
-                ("settlements", w.settlements(), dict(ambient=0.28, diffuse=0.75, specular=0.05)),
-                ("masts", w.masts(), dict(ambient=0.3, diffuse=0.65, specular=0.1)),
-                ("woodland", w.woodland(), dict(ambient=0.25, diffuse=0.7, specular=0.0))):
+        for name, mesh, detail, kw in (
+                ("airfield", w.airfield_surfaces(), False,
+                 dict(ambient=0.35, diffuse=0.55, specular=0.0)),
+                ("airfield_buildings", w.airfield_buildings(), True,
+                 dict(ambient=0.3, diffuse=0.75, specular=0.05)),
+                ("settlements", w.settlements(), True,
+                 dict(ambient=0.28, diffuse=0.75, specular=0.05)),
+                ("masts", w.masts(), True, dict(ambient=0.3, diffuse=0.65, specular=0.1)),
+                ("woodland", w.woodland(), True, dict(ambient=0.25, diffuse=0.7, specular=0.0))):
             if mesh is None or mesh.n_points == 0:
                 continue
-            self.scenery_actors.append(
-                p.add_mesh(mesh, scalars="rgb", rgb=True, name=name, show_scalar_bar=False, **kw))
+            actor = p.add_mesh(mesh, scalars="rgb", rgb=True, name=name, show_scalar_bar=False, **kw)
+            self.scenery_actors.append(actor)
+            if detail:
+                self.detail_actors.append(actor)
         roads = w.roads()
         if roads:
             self.scenery_actors.append(
@@ -538,18 +734,21 @@ class View3D(QtWidgets.QWidget):
         for name, cloud, colour, size in (("rwy_edge_lights", edge_lights, scenery.LIGHT_EDGE, 3.0),
                                           ("rwy_appr_lights", approach_lights, scenery.LIGHT_THRESHOLD, 3.5)):
             if cloud.n_points:
-                self.scenery_actors.append(
-                    p.add_mesh(cloud, color=colour, style="points", point_size=size,
-                               render_points_as_spheres=True, lighting=False, opacity=0.9, name=name))
+                actor = p.add_mesh(cloud, color=colour, style="points", point_size=size,
+                                   render_points_as_spheres=True, lighting=False, opacity=0.9,
+                                   name=name)
+                self.scenery_actors.append(actor)
+                self.detail_actors.append(actor)
 
     def _add_world_axes(self, center, extent):
-        """Small ENU triad at the world origin: a quiet reference, not a label field."""
+        """ENU triad at the world origin. Engineering reference: DEBUG only."""
         L = min(8000.0, extent * 0.03)
         o = np.array([0.0, 0.0, float(self.scenery.height(0.0, 0.0)) + 40])
         for d, lab in (((1, 0, 0), "E"), ((0, 1, 0), "N"), ((0, 0, 1), "U")):
             tip = o + np.array(d, float) * L
-            self.plotter.add_mesh(pv.PolyData(np.vstack([o, tip]), lines=np.array([2, 0, 1])),
-                                  color=AXIS_COLOR, opacity=0.5, line_width=2, name=f"axis_{lab}")
+            self.debug_props.append(
+                self.plotter.add_mesh(pv.PolyData(np.vstack([o, tip]), lines=np.array([2, 0, 1])),
+                                      color=AXIS_COLOR, opacity=0.5, line_width=2, name=f"axis_{lab}"))
 
     def _on_settings(self, key):
         if key in ("coverage_draw_range_m",):
@@ -600,6 +799,10 @@ class View3D(QtWidgets.QWidget):
             self._last_follow_pos = followed.copy()
         elif followed is not None:
             self._last_follow_pos = followed.copy()
+        # a live preset then corrects what the translation alone cannot: bearing, height and
+        # framing. It is asked again every frame, so the view follows a turn instead of
+        # sliding sideways to watch the aircraft leave the screen.
+        self._update_auto_camera(frame)
         cam_pos = np.array(cam.position)
 
         # ---- ownship -----------------------------------------------------
@@ -608,7 +811,7 @@ class View3D(QtWidgets.QWidget):
         if own is not None:
             # symbol scale, but never smaller than ~5 % of the camera distance (e.g. the top view)
             dist = float(np.linalg.norm(cam_pos - own.position))
-            scale = max(self.aircraft_scale, MIN_AIRCRAFT_ANGULAR_SIZE * dist / AIRCRAFT_LENGTH_M)
+            scale = max(self.aircraft_scale, OWNSHIP_ANGULAR_SIZE * dist / AIRCRAFT_LENGTH_M)
             # R_WB_drawn: the attitude the recorded path implies (the exported Yaw contradicts
             # the positions in this scenario - msdf_math.motion). Both are reported in DEBUG.
             self.aircraft.user_matrix = attitude.homogeneous(own.R_WB_drawn, own.position, scale)
@@ -638,11 +841,13 @@ class View3D(QtWidgets.QWidget):
             for key in ("cov", "edges"):
                 a[key].SetVisibility(show_cov)
                 a[key].user_matrix = T
-            a["bore"].SetVisibility(on and layers.get("show_sensors", True))
+            a["bore"].SetVisibility(on and layers.get("show_sensors", True)
+                                    and self.debug_btn.isChecked())
             a["bore"].user_matrix = T
             show_beam = on and st.beam is not None and layers.get("show_scan_beam", True)
+            debug = self.debug_btn.isChecked()
             for key in ("beam", "column", "axis"):
-                a[key].SetVisibility(show_beam)
+                a[key].SetVisibility(show_beam and (key == "beam" or debug))
                 a[key].user_matrix = T
             if show_beam:
                 pts, faces = scan_beam.beam_pyramid_frd(st.beam, a["rng"])
@@ -651,10 +856,22 @@ class View3D(QtWidgets.QWidget):
                 _set_mesh(a["col_mesh"], pts, faces)
                 a["axis_mesh"].points = scan_beam.beam_axis_frd(st.beam, a["rng"])
 
+        # ---- terrain follows the aircraft, in steps, never per frame -------
+        if own is not None:
+            self._move_terrain(own.position[:2])
+
         # ---- scenery (ground context; never part of any calculation) ------
         show_scenery = layers.get("show_scenery", True)
         for actor in self.scenery_actors:
             actor.SetVisibility(show_scenery)
+        # trees, houses, masts and runway lights are objects of tens of metres: from cruise
+        # altitude they are speckle on the terrain rather than scenery, so they are drawn only
+        # below DETAIL_CEILING_M (see _build_scenery)
+        if self.detail_actors:
+            agl = float(cam_pos[2] - self.scenery.height(cam_pos[0], cam_pos[1]))
+            near_ground = show_scenery and agl < DETAIL_CEILING_M
+            for actor in self.detail_actors:
+                actor.SetVisibility(near_ground)
 
         # ---- ground range rings follow the ownship (moved, never rebuilt) --
         show_rings = own is not None and layers.get("show_range_rings", True)
@@ -687,6 +904,38 @@ class View3D(QtWidgets.QWidget):
             actor.SetText(2, text)
         else:
             actor.SetInput(text)
+
+    def _move_terrain(self, xy):
+        """Re-centre the detailed terrain tiles on the aircraft, in steps.
+
+        Rebuilding is not free (about 90 ms for the near tile), so it happens only when the
+        aircraft has travelled a whole step - roughly once every two minutes at 150 m/s - and
+        the coarser tiles, which cover hundreds of kilometres, move even less often. The
+        datasets are replaced in place: no actor is created or destroyed while flying.
+        """
+        xy = np.asarray(xy, float)
+        if not len(getattr(self, "terrain_meshes", [])):
+            return
+        moved = float(np.linalg.norm(xy - self._terrain_center))
+        if moved < scenery.TERRAIN_REBUILD_M:
+            return
+        for i, (half, n) in enumerate(scenery.TERRAIN_LODS):
+            if moved < half * 0.25:                  # a coarse tile still covers the view
+                continue
+            X, Y = self.scenery._grid(xy, half, n)   # noqa: SLF001 - same package, one owner
+            self.terrain_meshes[i].copy_from(self.scenery._tile(X, Y))   # noqa: SLF001
+        self._terrain_center = xy
+
+    def _apply_debug_visibility(self):
+        """Operator mode draws the picture; DEBUG adds the engineering geometry over it."""
+        on = self.debug_btn.isChecked()
+        for prop in getattr(self, "debug_props", []):
+            prop.SetVisibility(on)
+        for actor in getattr(self, "legend_actors", [])[getattr(self, "debug_legend_from", 99):]:
+            actor.SetVisibility(on)
+        widget = getattr(self, "orientation_widget", None)
+        if widget is not None:
+            widget.SetEnabled(1 if on else 0)
 
     def _draw_body_axes(self, own, scale):
         """DEBUG: the drawn aircraft's own Forward / Right / Up axes, and, when the exported
@@ -732,7 +981,9 @@ class View3D(QtWidgets.QWidget):
             if actor is None:
                 mesh = paint(military_jet("low"), style.class_color(tv.state.classification))
                 actor = self.plotter.add_mesh(mesh, scalars="rgb", rgb=True, name=f"target_{tid}",
-                                              show_scalar_bar=False, smooth_shading=True, specular=0.3)
+                                              show_scalar_bar=False, smooth_shading=True,
+                                              pbr=True, metallic=AIRCRAFT_METALLIC,
+                                              roughness=AIRCRAFT_ROUGHNESS)
                 self.target_actors[tid] = actor
             dist = float(np.linalg.norm(cam_pos - tv.world))
             scale = max(self.aircraft_scale, MIN_AIRCRAFT_ANGULAR_SIZE * dist / AIRCRAFT_LENGTH_M)
@@ -740,8 +991,13 @@ class View3D(QtWidgets.QWidget):
             R = attitude.body_to_world(tv.heading_deg, tv.pitch_deg, tv.roll_deg)
             actor.user_matrix = attitude.homogeneous(R, tv.world, scale)
             actor.SetVisibility(True)
-            self._label(("TARGET", tid), f"T{tid}", tv.world, style.class_color(tv.state.classification),
-                        layers.get("show_target_labels", True))
+            # truth targets are already aircraft shapes: label them only when labels are asked
+            # for and the object is selected or the operator wants everything named
+            wanted = layers.get("show_target_labels", True) and (
+                self.debug_btn.isChecked() or self.ctrl.selected_key == tv.key
+                or len(frame.targets) <= MAX_ALWAYS_LABELLED)
+            self._label(("TARGET", tid), f"T{tid}", tv.world,
+                        style.class_color(tv.state.classification), wanted)
             rings.append(ring(1.3 * scale * AIRCRAFT_LENGTH_M) + tv.world)
             ring_cols.append(style.hex_to_rgb(style.class_color(tv.state.classification)))
         for tid, actor in self.target_actors.items():
@@ -888,7 +1144,18 @@ class View3D(QtWidgets.QWidget):
             if event.type() == QtCore.QEvent.MouseMove:
                 self._hover_pos = event.position()
                 self._press = None
+                if event.buttons() != QtCore.Qt.NoButton:
+                    self._release_auto_camera()     # a drag: the operator is flying the camera
                 self._refresh_hover()
+            elif event.type() == QtCore.QEvent.Wheel and self._cam_mode is not None:
+                # zoom the automatic camera instead of dollying out of it
+                turn = event.angleDelta().y()
+                if turn:
+                    lo, hi = CAMERA_ZOOM_LIMITS
+                    step = CAMERA_ZOOM_STEP if turn > 0 else 1.0 / CAMERA_ZOOM_STEP
+                    self._cam_zoom = float(np.clip(self._cam_zoom * step, lo, hi))
+                    self._refresh_auto_camera()
+                    return True
             elif event.type() == QtCore.QEvent.Leave:
                 self._hover_pos = None
                 self._hide_hover()
@@ -1054,6 +1321,8 @@ class View3D(QtWidgets.QWidget):
 
     def _redraw(self):
         """Draw the last frame again (a display option changed while nothing is playing)."""
+        if self._scene_built:
+            self._apply_debug_visibility()
         if self._last_frame is not None and self._scene_built:
             self.render_frame(self._last_frame)
         else:
@@ -1099,7 +1368,8 @@ class View3D(QtWidgets.QWidget):
                           "  axes F cyan / R orange / U violet on the model; exported velocity in pink"]
             cam = self.plotter.camera
             lines.append("  cam   " + "  ".join(f"{v:9.0f}" for v in cam.position)
-                         + f"   dist {np.linalg.norm(np.array(cam.position) - np.array(cam.focal_point)) / 1000:6.1f} km")
+                         + f"   dist {np.linalg.norm(np.array(cam.position) - np.array(cam.focal_point)) / 1000:6.1f} km"
+                         + f"   {self._cam_mode or 'manual'}  zoom x{self._cam_zoom:.2f}")
             for s_ in frame.sensors:
                 b = s_.beam
                 lines.append(f"  {s_.config.sensor_id:<10s} radar yaw {s_.yaw_deg:6.1f} pitch {s_.pitch_deg:+5.1f} "
@@ -1115,38 +1385,252 @@ class View3D(QtWidgets.QWidget):
         return f.ownship if f is not None else None
 
     def _set_camera(self, position, focal, up):
+        """Place the camera outright. This is the operator taking it: no preset holds it after."""
+        self._cam_mode = None
+        self._cam_goal = None
+        self._cam_timer.stop()
+        self._place_camera(position, focal, up)
+
+    def _place_camera(self, position, focal, up):
         cam = self.plotter.camera
         cam.position, cam.focal_point, cam.up = tuple(position), tuple(focal), tuple(up)
-        cam.view_angle = 40.0
+        cam.view_angle = VIEW_ANGLE_DEG
         held = self._object_point(self._follow_key) if self._follow_key is not None else None
         if held is None:
             own = self._own()
             held = own.position.copy() if own is not None else None
         self._last_follow_pos = None if held is None else np.asarray(held, float).copy()
-        self.plotter.renderer.ResetCameraClippingRange()
+        self._clip_dist = 0.0                        # force the planes for the new pose
+        self._refresh_clipping(travelling=False)
         if self.isVisible():
             self.plotter.render()
 
+    # ---- automatic camera: goal, easing, hand-over -----------------------
+    def _set_goal(self, mode, position, focal, up):
+        """State where the camera wants to be. ``mode`` None is a one-off move (the goal is
+        not re-derived); a preset key keeps re-deriving it every frame."""
+        if mode != self._cam_mode:
+            self._frame_dist = None                  # a new preset reframes from scratch
+        self._cam_mode = mode
+        self._cam_goal = (np.asarray(position, float), np.asarray(focal, float),
+                          np.asarray(up, float))
+        self._cam_clock.restart()
+        if not self.isVisible() or not self._scene_built:
+            return self._place_camera(position, focal, up)
+        self._cam_ticks = CAMERA_TRANSITION_MS // CAMERA_STEP_MS
+        self._cam_timer.start()
+
+    def _ease_camera(self):
+        """One step towards the goal. True while the camera is still travelling.
+        The caller owns the repaint (a frame render already repaints)."""
+        if self._cam_goal is None:
+            return False
+        goal_pos, goal_focal, goal_up = self._cam_goal
+        cam = self.plotter.camera
+        pos, focal = np.array(cam.position, float), np.array(cam.focal_point, float)
+        dt = self._cam_clock.restart() / 1000.0     # always: an unread clock would accumulate
+        gap = max(float(np.linalg.norm(goal_pos - pos)), float(np.linalg.norm(goal_focal - focal)))
+        a = 1.0 if gap <= CAMERA_SNAP_M else ease_alpha(dt)
+        cam.position = tuple(pos + (goal_pos - pos) * a)
+        cam.focal_point = tuple(focal + (goal_focal - focal) * a)
+        # the up vector is eased too (the top view turns it over), but never through the
+        # viewing direction: there the camera would have no defined roll left
+        up = np.array(cam.up, float) * (1.0 - a) + goal_up * a
+        view = np.array(cam.focal_point, float) - np.array(cam.position, float)
+        scale = np.linalg.norm(up) * np.linalg.norm(view)
+        sin_to_view = np.linalg.norm(np.cross(up, view)) / scale if scale > 1e-9 else 0.0
+        cam.up = tuple(up / np.linalg.norm(up)) if sin_to_view > 0.05 else tuple(goal_up)
+        cam.view_angle = VIEW_ANGLE_DEG
+        self._refresh_clipping(travelling=gap > CAMERA_SNAP_M)
+        return gap > CAMERA_SNAP_M
+
+    def _refresh_clipping(self, travelling):
+        """Keep the near / far planes valid without paying for them every frame.
+
+        ResetCameraClippingRange walks the visible props to find the scene bounds, which costs
+        about 2 ms here - too much to spend 30 times a second. While a preset simply follows
+        the ownship the camera holds its distance and the planes stay valid, exactly as they
+        did when a preset was applied once and then translated. So it is recomputed when the
+        camera is actually travelling, when its distance to the focal point has changed, and
+        once a second regardless, because the terrain tiles are rebuilt as the aircraft flies."""
+        cam = self.plotter.camera
+        dist = float(np.linalg.norm(np.array(cam.position) - np.array(cam.focal_point)))
+        due = self._clip_clock.elapsed() >= CLIPPING_REFRESH_MS
+        if travelling or due or abs(dist - self._clip_dist) > 0.02 * max(self._clip_dist, 1.0):
+            self.plotter.renderer.ResetCameraClippingRange()
+            self._clip_dist = dist
+            self._clip_clock.restart()
+
+    def _cam_tick(self):
+        """Carry a transition between frames, and to its end while the display is paused.
+
+        Bounded: once a live preset has been taken up, the frames themselves move the camera
+        (_update_auto_camera), so this must not settle into rendering at its own rate."""
+        self._cam_ticks -= 1
+        if not self.isVisible() or not self._scene_built or self._cam_goal is None \
+                or self._cam_ticks <= 0:
+            return self._cam_timer.stop()
+        travelling = self._ease_camera()
+        self.plotter.render()
+        if not travelling:
+            self._cam_timer.stop()
+
+    def _finish_transition(self):
+        """Arrive at the goal now, keeping whichever preset holds the camera."""
+        if self._cam_goal is not None:
+            self._cam_timer.stop()
+            self._place_camera(*self._cam_goal)
+
+    def _release_auto_camera(self):
+        """The operator has taken the camera: stop re-deriving a pose behind their back."""
+        if self._cam_mode is None:
+            return
+        self._cam_mode = None
+        self._cam_goal = None
+        self._cam_timer.stop()
+        self.ctrl.status_message.emit("Camera: manual - Follow, or a preset, resumes automatic framing")
+
+    def _refresh_auto_camera(self):
+        """Re-derive the live preset's goal now (its inputs changed, e.g. the wheel)."""
+        if self._cam_mode is not None:
+            self.apply_camera(self._cam_mode)
+
+    def set_follow(self, on: bool):
+        """Follow, from wherever it is switched (this toolbar or the sidebar copy): one path,
+        so both controls mean the same thing."""
+        if self.follow_btn.isChecked() != bool(on):
+            self.follow_btn.setChecked(bool(on))     # toggled keeps the other control in step
+        self._on_follow_clicked(bool(on))
+
+    def _on_follow_clicked(self, on):
+        if on:
+            self._cam_zoom = 1.0
+            self.apply_camera(self.preset_box.currentData() or "chase")
+        else:
+            self._cam_mode = None
+            self._cam_goal = None
+            self._cam_timer.stop()
+
+    def _update_auto_camera(self, frame):
+        """Per frame: re-derive the live preset's goal and ease towards it."""
+        if self._cam_mode is None or not self.follow_btn.isChecked():
+            return
+        goal = self._goal_for(self._cam_mode, frame)
+        if goal is None and self._cam_mode == "follow_selected":
+            self._follow_key = None                  # the held object is gone: back to the ownship
+            return self.apply_camera("chase")
+        if goal is not None:
+            self._cam_goal = tuple(np.asarray(v, float) for v in goal)
+        self._ease_camera()              # this frame is rendered anyway: no repaint from here
+
+    # ---- auto-framing ---------------------------------------------------
+    def _frame_points(self, frame):
+        """What the picture should contain: the ownship, the selection, and the drawn objects
+        near enough to matter. Truth targets and fused tracks only - a sensor track sits on
+        the same object, so it adds nothing to the framing."""
+        pts = []
+        own = frame.ownship
+        if own is not None:
+            pts.append(np.asarray(own.position, float))
+        sel = self._object_point(self.ctrl.selected_key)
+        if sel is not None:
+            pts.append(sel)
+        if own is None:
+            return pts
+        layers = self.ctrl.layers
+        near = []
+        if layers.get("show_targets", True):
+            near += [tv.world for tv in frame.targets if tv.world is not None]
+        if layers.get("show_fused_tracks", True):
+            near += [tv.world for tv in self.ctrl.world_tracks(frame.t_ms)
+                     if tv.kind == KIND_FUSED and tv.world is not None]
+        o = np.asarray(own.position, float)
+        pts += [p for p in (np.asarray(q, float) for q in near)
+                if np.linalg.norm(p - o) <= FRAME_RELEVANT_M]
+        return pts
+
+    def _framed(self, points, minimum):
+        """(centre, distance) that holds every point inside FRAME_FILL of the half-view.
+
+        The distance is held through FRAME_DEADBAND so a target drifting a little does not
+        make the view breathe in and out."""
+        pts = np.asarray(points, float).reshape(-1, 3)
+        if not len(pts):
+            return np.asarray(self.center, float), minimum * self._cam_zoom
+        centre = bounds_centre(pts)
+        want = max(minimum, framing_distance(pts, centre))
+        self._frame_dist = deadbanded(self._frame_dist, want)
+        return centre, self._frame_dist * self._cam_zoom
+
     def _chase_distance(self):
-        """About five displayed aircraft lengths (model ~15 m x symbol scale)."""
+        """About five displayed aircraft lengths (model ~15 m x symbol scale). Geometry only:
+        every caller applies the operator's zoom itself, so it is never applied twice."""
         return AIRCRAFT_LENGTH_M * self.aircraft_scale * 5.0
 
-    def tactical_view(self):
-        """Tactical overview: high, North-up, looking down at the ownship and its surroundings."""
-        own = self._own()
-        c = np.array([own.x, own.y, own.z]) if own is not None else self.center
-        d = max(self._chase_distance() * 6.0, 60000.0)
-        self._set_camera(c + np.array([0.0, -d * 0.55, d * 0.8]), c, (0, 0, 1))
+    # ---- the presets, as goals -------------------------------------------
+    # Each returns (position, focal point, up) for the frame it is given, or None when the
+    # frame cannot support it. They are pure: _update_auto_camera asks again every frame,
+    # which is what lets the chase view swing round behind a turning aircraft.
+    def _goal_for(self, name, frame):
+        fn = {"chase": self._goal_chase, "reset": self._goal_chase, "rear": self._goal_chase,
+              "side": self._goal_side, "top": self._goal_top, "tactical": self._goal_tactical,
+              "northup": self._goal_north_up, "follow_selected": self._goal_follow_selected,
+              }.get(name)
+        return None if fn is None or frame is None else fn(frame)
 
-    def north_up_view(self):
-        """Looking North along the ground, ownship centred (heading is read from the symbol)."""
-        own = self._own()
-        c = np.array([own.x, own.y, own.z]) if own is not None else self.center
-        d = self._chase_distance() * 2.5
-        self._set_camera(c + np.array([0.0, -d, d * 0.35]), c, (0, 0, 1))
+    def _goal_chase(self, frame):
+        """Behind and above the ownship, looking along the heading it is drawn at."""
+        own = frame.ownship
+        if own is None:
+            return None
+        return chase_pose(own.position, own.heading_drawn, self._chase_distance() * self._cam_zoom)
+
+    def _goal_side(self, frame):
+        own = frame.ownship
+        if own is None:
+            return None
+        psi = np.radians(own.heading_drawn)
+        right = np.array([np.cos(psi), -np.sin(psi), 0.0])
+        d = self._chase_distance() * self._cam_zoom
+        return own.position + right * d + np.array([0.0, 0.0, 0.08 * d]), own.position, (0, 0, 1)
+
+    def _goal_top(self, frame):
+        focal = frame.ownship.position if frame.ownship is not None else np.asarray(self.center, float)
+        return focal + np.array([0.0, 0.0, 60000.0 * self._cam_zoom]), focal, (0, 1, 0)
+
+    def _goal_north_up(self, frame):
+        own = frame.ownship
+        c = np.asarray(own.position if own is not None else self.center, float)
+        d = self._chase_distance() * 2.5 * self._cam_zoom
+        return c + np.array([0.0, -d, d * 0.35]), c, (0, 0, 1)
+
+    def _goal_tactical(self, frame):
+        """Tactical overview: high, North-up, framing the ownship and what is around it.
+
+        This is the one that auto-frames - the distance comes from the objects that matter,
+        so nothing worth seeing is left off the screen and the ownship is never a speck."""
+        pts = self._frame_points(frame)
+        if not pts:
+            return None
+        centre, d = self._framed(pts, max(self._chase_distance() * 6.0, 25_000.0))
+        u = np.array([0.0, -0.55, 0.80])
+        return centre + u / np.linalg.norm(u) * d, centre, (0, 0, 1)
+
+    def _goal_follow_selected(self, frame):
+        """Hold the selected target or track, from behind as seen from the ownship."""
+        point = self._object_point(self.ctrl.selected_key)
+        if point is None:
+            return None
+        own = frame.ownship
+        behind = np.array(point - own.position, float) if own is not None else np.array([-1.0, -1.0, 0.0])
+        behind[2] = 0.0
+        n = np.linalg.norm(behind)
+        behind = behind / n if n > 1.0 else np.array([-0.7, -0.7, 0.0])
+        d = max(3000.0, self._chase_distance() * 0.7) * self._cam_zoom
+        return point - behind * d + np.array([0.0, 0.0, 0.35 * d]), point, (0, 0, 1)
 
     def apply_camera(self, name: str):
-        """Apply a named camera now, or as soon as the scene exists."""
+        """Take up a named camera now, or as soon as the scene exists."""
         if not self._scene_built:
             self._pending_camera = name
             return
@@ -1154,17 +1638,29 @@ class View3D(QtWidgets.QWidget):
          "side": self.side_view, "rear": self.rear_view, "tactical": self.tactical_view,
          "northup": self.north_up_view, "follow_selected": self.follow_selected_view,
          "fit": self.fit_view}.get(name, self.reset_camera)()
-        i = self._preset_index("chase" if name == "reset" else name)
-        if i >= 0 and self.preset_box.currentIndex() != i:
-            self.preset_box.blockSignals(True)
-            self.preset_box.setCurrentIndex(i)
-            self.preset_box.blockSignals(False)
+        key = "chase" if name == "reset" else name
+        i = self._preset_index(key)
+        if i >= 0:
+            if self.preset_box.currentIndex() != i:
+                self.preset_box.setCurrentIndex(i)   # only `activated` re-enters here
+            self.camera_changed.emit(key)
 
     def _preset_index(self, key):
         for i, (_, k, _) in enumerate(CAMERA_PRESETS):
             if k == key:
                 return i
         return -1
+
+    def _take_up(self, mode):
+        """Ease into a live preset, which then holds the camera frame by frame."""
+        if not self._scene_built:
+            self._pending_camera = mode
+            return
+        frame = self._last_frame if self._last_frame is not None else self.ctrl.current_frame
+        goal = self._goal_for(mode, frame)
+        if goal is None:
+            return self._overview()
+        self._set_goal(mode, *goal)
 
     def reset_camera(self):
         """Aerospace chase camera: behind and above the ownship, looking along the heading."""
@@ -1175,60 +1671,45 @@ class View3D(QtWidgets.QWidget):
         self.rear_view()
 
     def rear_view(self):
-        if not self._scene_built:
-            self._pending_camera = "rear"
-            return
-        own = self._own()
-        if own is None:
-            return self._overview()
-        psi = np.radians(own.heading_drawn)          # behind the aircraft as it is drawn
-        fwd = np.array([np.sin(psi), np.cos(psi), 0.0])
-        d = self._chase_distance()
-        focal = own.position + fwd * d * 0.9
-        self._set_camera(own.position - fwd * d + np.array([0, 0, 0.32 * d]), focal, (0, 0, 1))
+        self.follow_btn.setChecked(True)
+        self._take_up("chase")
 
     def side_view(self):
-        if not self._scene_built:
-            self._pending_camera = "side"
-            return
-        own = self._own()
-        if own is None:
-            return self._overview()
-        psi = np.radians(own.heading_drawn)
-        right = np.array([np.cos(psi), -np.sin(psi), 0.0])
-        d = self._chase_distance()
-        self._set_camera(own.position + right * d + np.array([0, 0, 0.08 * d]), own.position, (0, 0, 1))
+        self.follow_btn.setChecked(True)
+        self._take_up("side")
 
     def top_view(self):
-        if not self._scene_built:
-            self._pending_camera = "top"
-            return
-        own = self._own()
-        focal = own.position if own is not None else self.center
-        self._set_camera(focal + np.array([0, 0, 60000.0]), focal, (0, 1, 0))
+        self.follow_btn.setChecked(True)
+        self._take_up("top")
+
+    def tactical_view(self):
+        """Tactical overview: high, North-up, auto-framed on the ownship and its surroundings."""
+        self.follow_btn.setChecked(True)
+        self._take_up("tactical")
+
+    def north_up_view(self):
+        """Looking North along the ground, ownship centred (heading is read from the symbol)."""
+        self.follow_btn.setChecked(True)
+        self._take_up("northup")
 
     def follow_selected_view(self):
         """Hold the selected target or track: the camera travels with it, smoothly."""
         if not self._scene_built:
             self._pending_camera = "follow_selected"
             return
-        point = self._object_point(self.ctrl.selected_key)
-        if point is None:
+        if self._object_point(self.ctrl.selected_key) is None:
             self.ctrl.status_message.emit("Follow selected: choose a target or track first "
                                           "(click it, or select a row in Track Details)")
             return self.reset_camera()
         self._follow_key = self.ctrl.selected_key
         self.follow_btn.setChecked(True)
-        d = max(3000.0, self._chase_distance() * 0.7)
-        own = self._own()
-        behind = point - own.position if own is not None else np.array([-1.0, -1.0, 0.0])
-        behind[2] = 0.0
-        n = np.linalg.norm(behind)
-        behind = behind / n if n > 1.0 else np.array([-0.7, -0.7, 0.0])
-        self._set_camera(point - behind * d + np.array([0, 0, 0.35 * d]), point, (0, 0, 1))
+        self._take_up("follow_selected")
 
     def fit_view(self):
-        """Frame everything that is drawn: ownship, truth targets and live tracks."""
+        """Frame everything that is drawn, once: ownship, truth targets and live tracks.
+
+        A single eased move, not a live preset - it frames the situation as it stands and then
+        leaves the camera to the operator."""
         if not self._scene_built:
             self._pending_camera = "fit"
             return
@@ -1246,9 +1727,9 @@ class View3D(QtWidgets.QWidget):
         pts = np.asarray(pts, float)
         lo, hi = pts.min(axis=0), pts.max(axis=0)
         centre = 0.5 * (lo + hi)
-        span = max(float(np.max(hi[:2] - lo[:2])), 20000.0)
-        self._set_camera(centre + np.array([-0.55 * span, -0.85 * span, 0.75 * span]),
-                         centre, (0, 0, 1))
+        span = max(float(np.max(hi[:2] - lo[:2])), 20000.0) * self._cam_zoom
+        self._set_goal(None, centre + np.array([-0.55 * span, -0.85 * span, 0.75 * span]),
+                       centre, (0, 0, 1))
 
     def _object_point(self, key):
         """World position of a drawn object by key, or None."""

@@ -1,12 +1,13 @@
 """Main window (the established layout: one world view, the PPI always visible).
 
 ┌───────────────────────────────────────────────────────────────────────────────┐
-│ MSDF DISPLAY   [3D View] [2D View]     ● LIVE  UDP 127.0.0.1:9000  ● FOLLOWING│
-│ Status · UDP · Packets · Rate · Tracks · Targets · Sim time · Last packet     │
+│ ☰  MSDF DISPLAY             [3D View] [2D View]  [Go Live]        ● FOLLOWING │
+│ Status · UDP · Packets · Rate · Tracks · Targets · Sim time · Last packet      │
 ├─────────────┬───────────────────────────────────────────┬─────────────────────┤
 │ Navigation  │  WORLD VIEW: 3D or 2D              [⤢]    │ Aircraft PPI  [⤢]   │
-│ [◀ collapse]│  (collapsed: a 26 px rail with [▶], Ctrl+B) │                     │
-│             │  playback bar (replay of the export)      │ Ownship             │
+│ Camera      │  (collapsed: a 26 px rail with [▶], Ctrl+B) │                     │
+│ Layers      │  playback bar (replay of the export)      │ Ownship             │
+│ [◀ collapse]│                                           │                     │
 ├─────────────┴───────────────────────────────────────────┴─────────────────────┤
 │                               TRACK DETAILS                                   │
 └───────────────────────────────────────────────────────────────────────────────┘
@@ -34,9 +35,6 @@ from widgets.ownship_panel import OwnshipPanel
 from widgets.popout import PopOutManager
 from widgets.rdp_status import RdpStatusBar
 from widgets.track_table import TrackTable
-
-LIVE_PILL = {"LIVE": "online", "WAITING FOR DATA": "paused", "NO DATA / STALE": "nodata",
-             "UDP UNAVAILABLE": "nodata", "RDP OFF": "paused"}
 
 RATES = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
 SIDEBAR_RAIL_PX = 26            # width of the collapsed sidebar rail
@@ -227,6 +225,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.popout_btns[key] = b
         self.popouts.changed.connect(self._popout_changed)
         self.nav.view_selected.connect(self._nav_view)
+        self.nav.bind_camera(self.view3d)     # sidebar camera controls and 3D toolbar, in step
 
         # aircraft ambience: 3D view only, one instance, independent of the data
         self.ambience = AircraftAmbience(self.view3d, controller.config.get("audio", {}), controller.app_dir, self)
@@ -361,13 +360,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_sidebar(not self.nav.isVisible())
 
     def _build_header(self):
+        """One compact row. The live state and the UDP address are not repeated here: the
+        status line immediately below is where they are reported, from the packet timing."""
         bar = QtWidgets.QFrame(objectName="Header")
         h = QtWidgets.QHBoxLayout(bar)
-        h.setContentsMargins(14, 6, 14, 6)
+        h.setContentsMargins(8, 3, 12, 3)
+        h.setSpacing(6)
+        self.sidebar_btn = QtWidgets.QToolButton(text="☰", objectName="SidebarToggle")
+        self.sidebar_btn.setToolTip("Show or hide the sidebar  (Ctrl+B)")
+        self.sidebar_btn.clicked.connect(self.toggle_sidebar)
+        h.addWidget(self.sidebar_btn)
         title = QtWidgets.QLabel("MSDF DISPLAY", objectName="AppTitle")
+        title.setToolTip("Moving Radar · Multi-Sensor Data Fusion")
         h.addWidget(title)
-        self.file_label = QtWidgets.QLabel("Moving Radar · Multi-Sensor Data Fusion", objectName="ViewInfo")
-        h.addWidget(self.file_label)
         h.addStretch(1)
         self.mode_group = QtWidgets.QButtonGroup(self)
         self.mode_btns = {}
@@ -377,18 +382,11 @@ class MainWindow(QtWidgets.QMainWindow):
             b.clicked.connect(lambda _=False, m=mode: self.ctrl.set_view_mode(m))
             h.addWidget(b)
             self.mode_btns[mode] = b
-        h.addSpacing(16)
-        self.live_pill = QtWidgets.QLabel("", objectName="StatePill")
-        self.live_pill.setToolTip("Live state from the actual packet timing on the UDP receiver")
-        h.addWidget(self.live_pill)
-        rdp = self.ctrl.rdp
-        self.udp_label = QtWidgets.QLabel(f"UDP {rdp.host}:{rdp.port}", objectName="ViewInfo")
-        h.addWidget(self.udp_label)
+        h.addSpacing(12)
         self.live_btn = QtWidgets.QPushButton("Go Live", objectName="ModeButton")
         self.live_btn.setToolTip("Follow the packet time again (after a replay / seek)")
         self.live_btn.clicked.connect(self.ctrl.go_live)
         h.addWidget(self.live_btn)
-        h.addSpacing(8)
         self.state_pill = QtWidgets.QLabel("", objectName="StatePill")
         self.state_pill.setToolTip("World views: following the packets (LIVE), replaying the export, or loading")
         h.addWidget(self.state_pill)
@@ -431,8 +429,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_state(self):
         c = self.ctrl
-        self._pill(self.live_pill, c.live_state + (f"  ·  {c.live_detail}" if c.live_detail else ""),
-                   LIVE_PILL.get(c.live_state, "paused"))
         if c.load_error:
             text, state = "EXPORT ERROR", "nodata"
         elif not c.is_ready:
