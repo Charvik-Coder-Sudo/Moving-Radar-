@@ -1,26 +1,32 @@
 """Place RDP tracks in world ENU (3D / 2D views) and in the aircraft frame (PPI).
 
-What the packet carries (see rdp/packet.py): per sensor, the RDP's state built from
-that radar's range / azimuth / elevation (MultiTrack imm3dc.Plot.calculateCartesian):
+THE PACKET STATE IS A WORLD ENU POSITION, not a radar-relative one. That is a property
+of the tracker upstream, verified in its source and against the data:
 
-    x = r cos(el) sin(az)      y = r cos(el) cos(az)      z = r sin(el)
+* `MultiTrack/imm3dc.py::Plot.calculateCartesian` builds the plot's Cartesian position as
+  ``x = r cos(phi) sin(theta)``, ``y = r cos(phi) cos(theta)``, ``z = r sin(phi)``, with
+  ``theta`` measured from North. That is x = East, y = North, z = Up - ENU.
+* `Sensor/Moving_Sensor_Airborne.py::Moving_Radar.export_sensor_csv` writes ``r/theta/phi``
+  as the target's spherical coordinates **about the world origin**, so the Cartesian
+  position above is the target's world position. Measured on the committed scenario:
+  it equals the exported truth trajectory to **0.00 m over all 65 rows**.
+* `imm3dc.py` feeds that straight to the filters - ``z = plot.pos[:2]`` for the horizontal
+  IMM and ``plot.pos[2]`` for the vertical one - so the track state, and the fused
+  ``Xfused`` built from it, stay in the same global frame.
 
-With the project's radar measurement definitions (Measurements_Geometry:
-az = atan2(L_R, L_F), el = atan2(-L_D, hypot(L_F, L_R))) this is exactly
+So the two placements are:
 
-    x = L_R,   y = L_F,   z = -L_D          i.e.  L_FRD = (y, x, -z)
+    world ENU      P_W = (x, y, z)                             taken as sent
+    aircraft FRD   P_B = R_WB(t)^T (P_W - P_WA(t))             ownship pose at the packet
+                                                               time t; this is what the
+                                                               aircraft-relative PPI needs
 
-so the radar-frame line of sight is recovered without any new convention, and the
-existing rotations place it:
+An earlier version read the state as a radar-frame line of sight and placed it with
+``P_WR + R_WR @ (y, x, -z)``. The algebra was right but the premise was not, and it put
+tracks 17.7-20.5 km from the truth they were built from, with PPI bearings ~110 deg out
+and the elevation sign inverted. Nothing upstream changed; only this interpretation did.
 
-    aircraft FRD   P_B = mount_xyz_frd + R_BR @ L_FRD          (no pose needed)
-    world ENU      P_W = P_WR(t) + R_WR(t) @ L_FRD            (exported radar pose at the
-                                                               packet time t)
-
-Sensor tracks use their own sensor. The fused state (Xfused) is formed by the RDP from
-states of different radars, so it has no single radar frame; it is placed with the
-frame of the packet's latestSensor and labelled as such. Velocities are never
-transformed (they stay as sent, relative to the moving radar).
+Velocities are never transformed - they stay as sent.
 
 Placements are computed once per packet state (the store publishes at 10 Hz) and
 cached per track with a bounded history - nothing is recomputed per rendered frame.
@@ -33,11 +39,17 @@ from collections import deque
 import numpy as np
 
 from models.track_state import KIND_FUSED
+from msdf_math import coordinates
 
 
-def rdp_to_frd(x, y, z) -> np.ndarray:
-    """RDP sensor-relative (x Right, y Forward, z Up) -> radar FRD line of sight."""
-    return np.array([y, x, -z], dtype=float)
+def rdp_to_world(x, y, z) -> np.ndarray:
+    """RDP track state -> world ENU metres.
+
+    Identity: the tracker already works in world ENU (see the module docstring). It is a
+    named function rather than an inline tuple so the frame it asserts is searchable, and
+    so there is one place to change if the upstream contract ever does.
+    """
+    return np.array([x, y, z], dtype=float)
 
 
 class TrackProjector:
@@ -63,13 +75,16 @@ class TrackProjector:
             num = self.sensor_number(tv)
             cfg = self.config_of.get(num)
             st = tv.state
-            L = rdp_to_frd(st.x, st.y, st.z)
-            body = world = None
-            if cfg is not None:
-                body = np.asarray(cfg.mount_xyz_frd, float) + cfg.R_BR @ L
-            pose = processor.radar_pose(num, st.timestamp * 1000.0) if processor is not None and num else None
-            if pose is not None:
-                world = pose[0] + pose[1] @ L
+            world = rdp_to_world(st.x, st.y, st.z)      # the state is already world ENU
+            body = None
+            # The PPI is aircraft-relative, so it needs the ownship subtracted and the
+            # remainder rotated into the body frame. R_WB_drawn is the attitude the
+            # recorded path implies, which is what every other view poses the aircraft
+            # with - using it here keeps the PPI and the 3D view on one attitude.
+            own, _row = processor.ownship_at(st.timestamp * 1000.0) if processor is not None \
+                else (None, -1)
+            if own is not None:
+                body = coordinates.world_to_frame(own.position, own.R_WB_drawn, world)[0]
             last_t, hw, hb = self._hist.get(tv.key, (None, None, None))
             if hw is None or (last_t is not None and st.timestamp < last_t):      # new / restarted track
                 hw, hb = deque(maxlen=self.trail_points), deque(maxlen=self.trail_points)
@@ -83,14 +98,12 @@ class TrackProjector:
             tv.world_trail = np.array(hw) if len(hw) else None
             tv.body_trail = np.array(hb) if len(hb) else None
             sensor = cfg.sensor_id if cfg is not None else f"sensorId {num}"
-            if world is None and body is None:
-                tv.placement = f"not placed: no sensor configuration / pose for {sensor}"
-            elif tv.kind == KIND_FUSED:
-                tv.placement = (f"fused state placed in the frame of latestSensor {sensor} "
-                                "(Xfused combines radar frames)")
-            else:
-                tv.placement = f"{sensor} radar frame -> exported radar pose at packet time"
-                if world is None:
-                    tv.placement += " (packet time outside the Scenario Export: world position unknown)"
+            tv.placement = ("world ENU as sent by the tracker (MultiTrack filters in global "
+                            "coordinates)")
+            if tv.kind != KIND_FUSED:
+                tv.placement += f"; reported by {sensor}"
+            if body is None:
+                tv.placement += ("; no aircraft-frame position - the packet time is outside "
+                                 "the Scenario Export, so the ownship pose is unknown")
         for key in [k for k in self._hist if k not in live]:       # hidden tracks: drop their history
             del self._hist[key]

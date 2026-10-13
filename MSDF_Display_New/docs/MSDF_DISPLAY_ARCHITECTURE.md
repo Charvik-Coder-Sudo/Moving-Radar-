@@ -6,7 +6,9 @@ by file; where a number appears it is the value in the code or in
 `config/display_config.json`.
 
 Companion documents: [COORDINATE_AND_ATTITUDE.md](COORDINATE_AND_ATTITUDE.md) (frames,
-rotations, validation) and [RDP_INTEGRATION.md](RDP_INTEGRATION.md) (the UDP stream).
+rotations, validation), [RDP_INTEGRATION.md](RDP_INTEGRATION.md) (the UDP stream) and
+[RENDERER_MIGRATION.md](RENDERER_MIGRATION.md) (the 3D renderer audit and the move from VTK
+to Qt Quick 3D — read that one before changing anything under `visualization/`).
 
 ---
 

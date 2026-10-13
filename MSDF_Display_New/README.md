@@ -267,6 +267,7 @@ docs/                         architecture, coordinates and attitude, RDP integr
 | [docs/INSTALLATION.md](docs/INSTALLATION.md) | installing and running on Windows, Linux and macOS: automatic and manual setup, configuration, Scenario Export and RDP settings, graphics requirements, troubleshooting |
 | [docs/RDP_INTEGRATION.md](docs/RDP_INTEGRATION.md) | endpoint, packet layout, state frame, time, threading, rejected packets, live state, track lifetime, troubleshooting — and that the RDP is read-only |
 | [docs/MSDF_DISPLAY_CPP_QT_DESIGN.md](docs/MSDF_DISPLAY_CPP_QT_DESIGN.md) | design only: how this application would be built in C++17/20 + Qt6, with a Python → C++ mapping table and phased plan |
+| [docs/RENDERER_MIGRATION.md](docs/RENDERER_MIGRATION.md) | the 3D renderer audit and decision: what the machine can do, what the exported data really contains (including the 653 unread IFF replies), why Qt Quick 3D over VTK, the ENU→renderer transform, and what Phase 3 measured |
 
 ## Aircraft and target motion
 

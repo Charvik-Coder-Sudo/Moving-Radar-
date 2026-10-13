@@ -28,6 +28,7 @@ import numpy as np
 from models.track_state import KIND_FUSED, KIND_SENSOR, TrackState
 from processing.frame import RadarView, TrackView
 from rdp.packet import SystemTrackState, components
+from visualization import style
 
 ACTIVE, STALE, HIDDEN = "ACTIVE", "STALE", "HIDDEN"
 
@@ -191,9 +192,16 @@ def _xyz(state) -> tuple:
 def _view(kind, source, track_id, st: SystemTrackState, state, status, age, history,
           assoc=(), fused_into=(), system_track_id=None) -> TrackView:
     c = components(state)
+    # Identity comes off the packet and is applied to every view of this system track - the
+    # fused track and each contributing sensor track alike. The IFF belongs to the TRACK, not
+    # to one sensor's report of it: MultiTrack carries it through fusion onto the SystemTrack
+    # (ci_ici_mulitgt.SystemTrack), so a sensor track shown under a friendly system track is
+    # a view of that same friendly aircraft.
     ts = TrackState(timestamp=st.time, track_id=track_id, target_id="",
                     x=c["x"], y=c["y"], z=c["z"], vx=c["vx"], vy=c["vy"], vz=c["vz"], omega=c["w"],
-                    ax=c["ax"], ay=c["ay"], az=c["az"], classification="", source=source, status=status,
+                    ax=c["ax"], ay=c["ay"], az=c["az"],
+                    classification=style.classification_from_auth(st.auth),
+                    source=source, status=status, auth=st.auth, icao=st.icao,
                     associated_tracks=assoc)
     rng = math.sqrt(c["x"] ** 2 + c["y"] ** 2 + c["z"] ** 2)
     az = math.degrees(math.atan2(c["x"], c["y"])) % 360.0          # 0 = forward, + right

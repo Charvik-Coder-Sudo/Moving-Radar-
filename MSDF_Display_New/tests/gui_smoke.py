@@ -22,7 +22,7 @@ sys.path.insert(0, str(APP))
 os.environ.setdefault("QT_API", "pyside6")   # the app resolves its own paths: no chdir needed
 
 import paths  # noqa: E402
-from PySide6 import QtCore, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from rdp.packet import encode_for_test  # noqa: E402
 from visualization.view_controller import ViewController  # noqa: E402
@@ -36,6 +36,9 @@ free.bind(("127.0.0.1", 0))
 PORT = free.getsockname()[1]
 free.close()
 
+# the 3D surface format must be chosen before the application exists
+from visualization.view_3d_quick import surface_format  # noqa: E402
+QtGui.QSurfaceFormat.setDefaultFormat(surface_format())
 app = QtWidgets.QApplication([])
 app.setStyleSheet(QSS)
 cfg = json.loads((APP / "config" / "display_config.json").read_text(encoding="utf-8"))
@@ -100,6 +103,117 @@ check("tracks placed in world and aircraft frames",
       wait_for(lambda: ctrl.track_views and all(tv.world is not None and tv.body_xyz is not None
                                                  for tv in ctrl.track_views), 5))
 shot("2_live_3d")
+
+# ---- camera: every preset reachable, and the operator able to move within it -------------
+import numpy as np  # noqa: E402
+
+from visualization import camera as cam  # noqa: E402
+
+v3 = win.view3d
+
+
+def framed_gap():
+    """How far the ownship is from the middle of the picture, in half-screens.
+
+    The measure that matters for "is the aircraft still held": 0 is dead centre, 1 is the
+    edge of the view. Taken from the pose actually rendered.
+    """
+    own = ctrl.current_frame.ownship
+    if own is None:
+        return float("nan")
+    view = np.asarray(v3.camera_focal, float) - np.asarray(v3.camera_eye, float)
+    to_own = np.asarray(own.position, float) - np.asarray(v3.camera_eye, float)
+    cos = float(np.dot(view, to_own) / (np.linalg.norm(view) * np.linalg.norm(to_own) + 1e-9))
+    off = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+    return off / (0.5 * cam.VIEW_ANGLE_DEG)
+
+
+poses = {}
+for _label, key, _sc in cam.CAMERA_PRESETS:
+    v3.apply_camera(key)
+    pump(0.25)
+    poses[key] = np.asarray(v3.camera_eye, float).copy()
+check("every camera preset gives a usable pose",
+      all(np.all(np.isfinite(p)) for p in poses.values()))
+check("the presets are actually different viewpoints", len({tuple(np.round(p, 1))
+                                                            for p in poses.values()}) >= 8)
+
+v3.apply_camera("chase")
+pump(0.4)
+behind = np.asarray(v3.camera_eye, float).copy()
+focal_at_chase = np.asarray(v3.camera_focal, float).copy()
+held_before = framed_gap()
+# 180 deg of orbit at ORBIT_DEG_PER_PX per pixel: drag from behind the aircraft to in front
+v3._on_orbit(-180.0 / cam.ORBIT_DEG_PER_PX, 0.0)
+pump(0.4)
+infront = np.asarray(v3.camera_eye, float).copy()
+own_xy = np.asarray(ctrl.current_frame.ownship.position, float)
+check("orbit moves the camera to the far side of the aircraft",
+      float(np.linalg.norm(infront - behind)) > 0.8 * float(np.linalg.norm(behind - own_xy)))
+check("orbit keeps the aircraft framed (follow is not dropped)",
+      v3.follow_btn.isChecked() and framed_gap() < 1.0, )
+# Chase looks at a point AHEAD of the aircraft, so orbiting pivots there rather than on the
+# jet; the distance that must hold is the one to what the camera is actually looking at.
+orbit_radius = np.linalg.norm(infront - np.asarray(v3.camera_focal, float))
+check("orbit holds the viewing distance",
+      abs(orbit_radius - np.linalg.norm(behind - focal_at_chase)) < 0.02 * orbit_radius)
+
+# elevation: look at it from below, then from above, without the picture rolling over
+v3._on_orbit(0.0, -90.0 / cam.ORBIT_DEG_PER_PX)
+pump(0.3)
+check("orbit can get under the aircraft", v3.camera_eye[2] < own_xy[2])
+v3._on_orbit(0.0, 200.0 / cam.ORBIT_DEG_PER_PX)
+pump(0.3)
+_az, el, _d = cam.spherical(np.asarray(v3.camera_eye, float) - np.asarray(v3.camera_focal, float))
+check("elevation stops short of the pole", el <= cam.ORBIT_ELEVATION_LIMITS[1] + 1e-6)
+
+far = np.linalg.norm(np.asarray(v3.camera_eye, float) - np.asarray(v3.camera_focal, float))
+v3._on_zoom(3)
+pump(0.3)
+near = np.linalg.norm(np.asarray(v3.camera_eye, float) - np.asarray(v3.camera_focal, float))
+check("wheel zooms in", near < far * 0.95)
+
+focal_before = np.asarray(v3.camera_focal, float).copy()
+v3._on_pan(60.0, 40.0)
+pump(0.3)
+check("middle drag pans what the camera looks at",
+      float(np.linalg.norm(np.asarray(v3.camera_focal, float) - focal_before)) > 1.0)
+
+clock_before, selected_before = ctrl.current_frame.t_ms, ctrl.selected_key
+v3.reset_view()
+pump(0.5)
+check("reset view returns to the preset framing",
+      not v3.director.adjusted and abs(framed_gap() - held_before) < 0.25)
+check("reset view leaves the simulation alone",
+      ctrl.is_ready and ctrl.selected_key == selected_before
+      and ctrl.current_frame.t_ms == clock_before)
+
+# Follow ownship holds the aircraft itself, so orbiting there inspects the jet from any angle
+v3.apply_camera("follow_ownship")
+pump(0.4)
+own_now = np.asarray(ctrl.current_frame.ownship.position, float)
+check("follow ownship pivots on the aircraft",
+      float(np.linalg.norm(np.asarray(v3.camera_focal, float) - own_now)) < 1.0)
+ring = []
+for _ in range(4):
+    v3._on_orbit(-90.0 / cam.ORBIT_DEG_PER_PX, 0.0)
+    pump(0.25)
+    ring.append(framed_gap())
+check("the aircraft stays framed from every bearing", max(ring) < 0.5)
+
+v3.apply_camera("orbit")
+pump(0.4)
+check("free orbit releases the aircraft but still answers the mouse",
+      not v3.follow_btn.isChecked())
+free_before = np.asarray(v3.camera_eye, float).copy()
+v3._on_orbit(120.0, 25.0)
+pump(0.3)
+check("free orbit moves the camera",
+      float(np.linalg.norm(np.asarray(v3.camera_eye, float) - free_before)) > 1.0)
+shot("2b_camera")
+
+v3.apply_camera("chase")
+pump(0.3)
 ctrl.set_view_mode("2d")
 pump(1.0)
 check("2D view shown", win.stack.currentWidget() is win.view2d)

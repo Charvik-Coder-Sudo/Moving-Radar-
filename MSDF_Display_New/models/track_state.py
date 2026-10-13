@@ -49,8 +49,38 @@ class TrackState:
     source: str
     status: str
 
+    # Identity, as decided upstream and carried on the packet. The display never works any of
+    # this out for itself: see docs/IDENTITY.md.
+    #   auth  - the IFF interrogation result in MultiTrack's own words: "friend" or
+    #           "unknown". "unknown" is the ABSENCE of a reply, never evidence against.
+    #   icao  - the 24-bit address that authenticated it, spelled as the source spells it
+    #           ("0x000FA0"), or None when the track has none.
+    # Truth targets read from the Scenario Export carry auth "" and icao None: the export is
+    # ground truth, not an interrogation, and must never look like one.
+    auth: str = ""
+    icao: str | None = None
+
     row: int = -1
     associated_tracks: tuple = ()
+
+    @property
+    def authenticated(self) -> bool:
+        """True only when an IFF interrogation actually authenticated this track."""
+        return self.auth == "friend"
+
+    @property
+    def auth_label(self) -> str:
+        """How the authentication reads in the UI, kept in one place.
+
+        Deliberately not the same words as the classification: MultiTrack decides identity
+        with a single field, and showing 'Friendly / Authenticated' twice would imply two
+        independent confirmations where there is only one.
+        """
+        if self.auth == "friend":
+            return "Authenticated (IFF)"
+        if self.auth == "unknown":
+            return "No IFF reply"
+        return "—"
 
     @property
     def position(self) -> np.ndarray:

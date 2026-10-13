@@ -44,7 +44,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from models.track_state import KIND_FUSED, KIND_TARGET
 from msdf_math import coordinates
-from processing.track_projection import rdp_to_frd
 from visualization import hover, style, symbols
 from visualization.tracks_2d import TrackItems2D, track_label, visible_tracks
 from widgets.legend_widget import LegendWidget
@@ -301,15 +300,22 @@ class AircraftPPI(QtWidgets.QWidget):
             self.render()
 
     def _body_rotation(self, tv):
-        cfg = self.ctrl.projector.config_of.get(self.ctrl.projector.sensor_number(tv))
-        return cfg.R_BR if cfg is not None else None
+        """Body-to-world attitude of the ownship, for turning world vectors into the
+        aircraft frame. The same attitude the 3D view poses the aircraft with, so the two
+        views cannot disagree about which way the nose points."""
+        own = self._frame.ownship if self._frame is not None else None
+        return own.R_WB_drawn if own is not None else None
 
     def _body_vector(self, tv, d):
-        """Sensor-relative vector (as sent) expressed along the aircraft axes (rotation only)."""
+        """A world ENU vector (as sent) expressed along the aircraft axes (rotation only).
+
+        Velocities arrive in the same frame as positions - world ENU - so the ownship
+        attitude is what turns them into the aircraft frame, not the radar mounting.
+        """
         R = self._body_rotation(tv)
-        if R is None:
+        if R is None or tv.body_xyz is None:
             return None
-        v = R @ rdp_to_frd(*d)
+        v = coordinates.world_to_frame(np.zeros(3), R, np.asarray(d, float))[0]
         b = tv.body_xyz
         return b[1] * KM, b[0] * KM, (b[1] + v[1]) * KM, (b[0] + v[0]) * KM
 
@@ -400,7 +406,8 @@ class AircraftPPI(QtWidgets.QWidget):
         R = self._body_rotation(tv)
         if R is None:
             return tv.heading_deg
-        v = R @ rdp_to_frd(tv.state.vx, tv.state.vy, tv.state.vz)
+        v = coordinates.world_to_frame(
+            np.zeros(3), R, np.array([tv.state.vx, tv.state.vy, tv.state.vz], float))[0]
         return float(np.degrees(np.arctan2(v[1], v[0])) % 360.0)
 
     def render(self):

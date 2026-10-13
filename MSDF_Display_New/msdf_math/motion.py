@@ -2,18 +2,24 @@
 
 Why this module exists
 ----------------------
-In the recorded scenario the exported attitude does not agree with the exported path.
-Measured over the whole flight (and in the source trajectory files, ``*_ms.tdf``):
+In the recorded scenario the exported ``Vx`` / ``Vy`` columns are transposed with respect
+to the ``X`` / ``Y`` position columns: ``Vx`` carries the NORTH component and ``Vy`` the
+EAST one. Measured on every trajectory file of the export regenerated 2026-10-12:
 
-    ownship path velocity      (136.006,  63.266, +10) m/s    ->  course  65.05 deg
-    ownship velocity columns   ( 63.266, 136.005, +10) m/s    ->  yaw     24.95 deg
+    Vx  vs  dY/dt (North)      agree to 0.005 m/s
+    Vy  vs  dX/dt (East)       agree to 0.000 m/s
+    columns read as labelled   220 - 424 m/s wrong, per file
 
-Same speed (150.000 m/s), the East and North components exchanged: the ``Vx`` / ``Vy``
-columns are swapped with respect to ``X`` / ``Y``. The position columns are the consistent
-ones - the export's own ``Azimuth`` column equals ``atan2(X, Y)`` (compass) to 0.0001 deg,
-and every radar measurement is built from the positions. The exported ``Yaw`` is computed
-upstream as ``atan2(Vx, Vy)`` (``Coordinate_Geometry.Velocity_Altitudes``), so it inherits
-the swap and is 40.1 deg away from the direction the ownship travels.
+The position columns are the consistent ones - the export's own ``Azimuth`` column equals
+``atan2(X, Y)`` (compass) to 0.0001 deg, and every radar measurement is built from the
+positions.
+
+The exported ``Yaw`` is ``atan2(Vy, Vx)``, so READ THROUGH THE SWAP it is a compass course,
+and it now agrees with the direction the ownship actually travels to 0.017 deg - the residual
+being the 0.1 m position quantisation this module allows for below. (An earlier export
+computed ``Yaw = atan2(Vx, Vy)`` and so inherited the swap, leaving the nose 40.1 deg away
+from the flown path. That is fixed upstream; the transposition of the columns themselves is
+not, which is why this module still takes its course from the positions.)
 
 This module derives the attitude the aircraft must have to fly the recorded path:
 

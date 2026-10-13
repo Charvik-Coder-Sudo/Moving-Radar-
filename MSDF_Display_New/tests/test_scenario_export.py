@@ -17,6 +17,13 @@ from data_loader.scenario_export import (OWNSHIP_COLUMNS, SCHEDULE_COLUMNS, Scen
                                          ScenarioExportError)
 
 CONFIG = json.loads((APP / "config" / "display_config.json").read_text(encoding="utf-8"))
+import paths  # noqa: E402
+
+# the application discovers the export rather than trusting the configured value; these
+# checks are against the REAL data, so they must look in the same places
+_found = paths.find_export(CONFIG.get("scenario_export", {}).get("root"))[0]
+if _found is not None:
+    CONFIG["scenario_export"]["root"] = str(_found)
 EXPORT = ScenarioExport(CONFIG, APP)
 
 

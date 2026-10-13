@@ -17,9 +17,11 @@ APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
 os.environ.setdefault("QT_API", "pyside6")
 
-from visualization.view_3d import (CAMERA_EASE_TAU, FRAME_FILL, FRAME_RELEVANT_M,  # noqa: E402
-                                  RANGE_RINGS_M, VIEW_ANGLE_DEG, bounds_centre, chase_pose,
-                                  deadbanded, ease_alpha, framing_distance)
+from visualization.camera import (CAMERA_EASE_TAU, FRAME_FILL,  # noqa: E402
+                                  ORBIT_ELEVATION_LIMITS, VIEW_ANGLE_DEG, bounds_centre,
+                                  chase_pose, deadbanded, ease_alpha, framing_distance,
+                                  from_spherical, orbited, pan_offset, spherical)
+from visualization.world_style import FRAME_RELEVANT_M, RANGE_RINGS_M  # noqa: E402
 
 
 class TestEasing(unittest.TestCase):
@@ -123,6 +125,73 @@ class TestFraming(unittest.TestCase):
         # one point has no extent to frame: the preset's own distance decides
         self.assertEqual(framing_distance([(1000.0, 2000.0, 3000.0)], (1000.0, 2000.0, 3000.0)), 0.0)
         self.assertEqual(framing_distance([], (0, 0, 0)), 0.0)
+
+
+class TestOrbitGeometry(unittest.TestCase):
+    """The operator swinging the camera round whatever a preset is framing."""
+
+    def test_azimuth_reads_like_a_compass(self):
+        # 0 = the camera is North of what it looks at, 90 = East: the same sense as a heading
+        for az, offset in ((0.0, (0.0, 1.0, 0.0)), (90.0, (1.0, 0.0, 0.0)),
+                           (180.0, (0.0, -1.0, 0.0)), (270.0, (-1.0, 0.0, 0.0))):
+            np.testing.assert_allclose(from_spherical(az, 0.0, 1.0), offset, atol=1e-12)
+
+    def test_elevation_is_above_the_horizon(self):
+        np.testing.assert_allclose(from_spherical(0.0, 90.0, 100.0), (0, 0, 100), atol=1e-9)
+        self.assertLess(from_spherical(0.0, -30.0, 100.0)[2], 0.0)   # below: looking up at it
+
+    def test_spherical_round_trips(self):
+        rng = np.random.default_rng(3)
+        for v in rng.uniform(-5000.0, 5000.0, size=(40, 3)):
+            np.testing.assert_allclose(from_spherical(*spherical(v)), v, atol=1e-7)
+
+    def test_no_drag_changes_nothing(self):
+        """The reason a preset and the operator can share the camera: until the operator
+        actually moves, the preset's framing is returned exactly as it asked for it."""
+        eye, focal = (1000.0, -2000.0, 6000.0), (0.0, 0.0, 5000.0)
+        np.testing.assert_allclose(orbited(eye, focal, 0.0, 0.0, 1.0), eye, atol=1e-9)
+
+    def test_orbiting_keeps_the_distance_and_the_focal_point(self):
+        eye, focal = (0.0, -3000.0, 1000.0), (0.0, 0.0, 0.0)
+        r = np.linalg.norm(np.array(eye) - focal)
+        for d_az in (0.0, 37.0, 180.0, 359.0):
+            for d_el in (-40.0, 0.0, 25.0):
+                moved = orbited(eye, focal, d_az, d_el)
+                self.assertAlmostEqual(float(np.linalg.norm(moved - np.array(focal))), r, places=6)
+
+    def test_the_operator_can_get_in_front_of_the_aircraft(self):
+        """The complaint this answers: the camera must not be stuck behind the aircraft."""
+        behind, focal = np.array([0.0, -3000.0, 0.0]), np.zeros(3)
+        front = orbited(behind, focal, 180.0, 0.0)
+        np.testing.assert_allclose(front, [0.0, 3000.0, 0.0], atol=1e-6)
+
+    def test_elevation_is_clamped_short_of_the_poles(self):
+        # at the pole azimuth stops meaning anything and the picture would roll on its own
+        lo, hi = ORBIT_ELEVATION_LIMITS
+        for d_el in (1e4, -1e4):
+            _az, el, _d = spherical(orbited((0.0, -100.0, 0.0), (0, 0, 0), 0.0, d_el))
+            self.assertGreaterEqual(el, lo - 1e-6)
+            self.assertLessEqual(el, hi + 1e-6)
+
+    def test_zoom_scales_distance_without_moving_the_focal_point(self):
+        eye, focal = (0.0, -1000.0, 0.0), (0.0, 0.0, 0.0)
+        near = orbited(eye, focal, 0.0, 0.0, 0.5)
+        self.assertAlmostEqual(float(np.linalg.norm(near)), 500.0, places=6)
+
+    def test_pan_scales_with_viewing_distance(self):
+        """Panning has to feel the same close in and far out, so the step is a fraction of
+        the distance rather than a fixed number of metres."""
+        right, up = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+        near = pan_offset(10.0, 0.0, right, up, 1_000.0)
+        far = pan_offset(10.0, 0.0, right, up, 10_000.0)
+        np.testing.assert_allclose(far, np.asarray(near) * 10.0, atol=1e-9)
+
+    def test_pan_moves_the_scene_with_the_pointer(self):
+        # grab-and-drag: dragging right carries the scene right, so the look-at goes left
+        shift = pan_offset(10.0, 0.0, (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1000.0)
+        self.assertLess(shift[0], 0.0)
+        shift_up = pan_offset(0.0, 10.0, (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1000.0)
+        self.assertGreater(shift_up[2], 0.0)
 
 
 class TestDeadband(unittest.TestCase):

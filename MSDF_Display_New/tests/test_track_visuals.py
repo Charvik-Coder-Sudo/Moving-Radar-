@@ -65,9 +65,8 @@ class TestVisualSeparation(unittest.TestCase):
 
     def test_the_three_views_agree_on_the_symbols(self):
         """3D glyphs, 2D/PPI symbols and the legend icons all come from the same table."""
-        import visualization.view_3d as v3
         from visualization import symbols
-        from visualization.tracks_3d import GLYPH_SHAPES
+        from visualization.quick3d.ribbon import GLYPH_SHAPES
         for key, shape in ((style.PRIMARY, "square"), (style.SECONDARY, "square"),
                            (style.FUSED, "triangle")):
             src = style.SOURCES[key]
@@ -79,56 +78,76 @@ class TestVisualSeparation(unittest.TestCase):
 
     def test_three_dimensional_weights(self):
         """3D: sensor squares stay small and thin, the fused triangle is larger and brighter."""
-        import visualization.view_3d as v3
-        self.assertGreater(v3.FUSED_GLYPH_ANGULAR_SIZE, max(v3.SENSOR_GLYPH_ANGULAR_SIZE.values()))
-        self.assertGreater(v3.FUSED_GLYPH_WIDTH, v3.SENSOR_GLYPH_WIDTH)
-        self.assertGreater(v3.FUSED_GLYPH_OPACITY, v3.SENSOR_GLYPH_OPACITY)
-        self.assertGreater(v3.FUSED_TRAIL_WIDTH, v3.SENSOR_TRAIL_WIDTH)
-        self.assertGreater(v3.FUSED_TRAIL_OPACITY, v3.SENSOR_TRAIL_OPACITY)
-        self.assertGreater(v3.SENSOR_GLYPH_ANGULAR_SIZE["PRIMARY"],
-                           v3.SENSOR_GLYPH_ANGULAR_SIZE["SECONDARY"])
+        from visualization import world_style as ws
+        self.assertGreater(ws.FUSED_GLYPH_ANGULAR_SIZE, max(ws.SENSOR_GLYPH_ANGULAR_SIZE.values()))
+        self.assertGreater(ws.FUSED_GLYPH_WIDTH, ws.SENSOR_GLYPH_WIDTH)
+        self.assertGreater(ws.FUSED_GLYPH_OPACITY, ws.SENSOR_GLYPH_OPACITY)
+        self.assertGreater(ws.FUSED_TRAIL_WIDTH, ws.SENSOR_TRAIL_WIDTH)
+        self.assertGreater(ws.FUSED_TRAIL_OPACITY, ws.SENSOR_TRAIL_OPACITY)
+        self.assertGreater(ws.SENSOR_GLYPH_ANGULAR_SIZE["PRIMARY"],
+                           ws.SENSOR_GLYPH_ANGULAR_SIZE["SECONDARY"])
+
+    def test_the_renderer_takes_its_layer_strengths_from_one_place(self):
+        """scene.qml used to carry its own copy of these opacities. The draw order and the
+        strengths are one vocabulary: if they live in two files they drift apart."""
+        from visualization import world_style as ws
+        layers = dict(ws.RIBBON_LAYERS)
+        self.assertEqual(layers["fusedGlyphs"], ws.FUSED_GLYPH_OPACITY)
+        self.assertEqual(layers["sensorTrails"], ws.SENSOR_TRAIL_OPACITY)
+        self.assertEqual(layers["selection"], 1.00)          # never dimmed by what it marks
+        qml = (Path(__file__).resolve().parents[1]
+               / "visualization" / "quick3d" / "scene.qml").read_text(encoding="utf-8")
+        self.assertIn("property var ribbonLayers: []", qml)   # filled from Python, not duplicated
 
     def test_the_glyph_outlines_are_closed_and_camera_facing(self):
-        from visualization.tracks_3d import camera_glyphs
+        from visualization.quick3d.ribbon import GLYPH_SHAPES, glyph_segments
         right, up = np.array([1.0, 0, 0]), np.array([0, 0, 1.0])
-        mesh = camera_glyphs([[0, 0, 0], [1000, 0, 0]], [(255, 0, 0), (0, 255, 0)], "triangle",
-                             [100.0, 200.0], right, up)
-        self.assertEqual(mesh.n_points, 8)                 # two closed 4-point outlines
-        pts = np.asarray(mesh.points)
-        np.testing.assert_allclose(pts[0], pts[3])         # closed
-        self.assertAlmostEqual(float(np.abs(pts[:4, 1]).max()), 0.0, places=9)   # in the camera plane
+        segs = glyph_segments([[0, 0, 0], [1000, 0, 0]], "triangle", [100.0, 200.0], right, up)
+        per_glyph = len(GLYPH_SHAPES["triangle"]) - 1       # a closed outline: 3 segments
+        self.assertEqual(segs.shape, (2 * per_glyph, 2, 3))
+        for g in range(2):                                 # each outline returns to its start
+            ring = segs[g * per_glyph:(g + 1) * per_glyph]
+            np.testing.assert_allclose(ring[0, 0], ring[-1, 1], atol=1e-9)
+        # the outline lies in the plane the camera axes span: it faces the camera squarely
+        self.assertAlmostEqual(float(np.abs(segs[..., 1]).max()), 0.0, places=9)
+        # and it is drawn at the size asked for: the second glyph is twice the first
+        self.assertAlmostEqual(np.abs(segs[per_glyph:, :, 2]).max()
+                               / np.abs(segs[:per_glyph, :, 2]).max(), 2.0, places=9)
 
 
 class TestLabelPlacement(unittest.TestCase):
     """A fused track sits on its truth target, so their 3D labels must not land on each other."""
 
     def test_colocated_labels_are_stacked_one_line_apart(self):
-        from visualization.view_3d import LABEL_LINE_PX, LABEL_OFFSET_PX, stacked_offsets
+        from visualization.world_style import LABEL_LINE_PX, LABEL_OFFSET_PX, stacked_offsets
         off = stacked_offsets([500.0, 500.0, 502.0], [400.0, 400.0, 399.0], [True] * 3)
         ys = sorted(o[1] + y for o, y in zip(off, (400.0, 400.0, 399.0)))
         self.assertTrue(all(b - a >= LABEL_LINE_PX - 1 for a, b in zip(ys, ys[1:])), ys)
 
     def test_labels_far_apart_keep_their_natural_offset(self):
-        from visualization.view_3d import LABEL_OFFSET_PX, stacked_offsets
+        from visualization.world_style import LABEL_OFFSET_PX, stacked_offsets
         off = stacked_offsets([100.0, 900.0], [100.0, 700.0], [True, True])
         self.assertEqual(off, [LABEL_OFFSET_PX, LABEL_OFFSET_PX])
 
     def test_labels_behind_the_camera_are_left_alone(self):
-        from visualization.view_3d import LABEL_OFFSET_PX, stacked_offsets
+        from visualization.world_style import LABEL_OFFSET_PX, stacked_offsets
         off = stacked_offsets([500.0, 500.0], [400.0, 400.0], [False, True])
         self.assertEqual(off[0], LABEL_OFFSET_PX)          # not placed, so it never pushes the other one
         self.assertEqual(off[1], LABEL_OFFSET_PX)
 
 
 class TestAgeFade(unittest.TestCase):
-    def test_trail_fades_from_the_horizon_colour_to_the_track_colour(self):
-        from visualization.view_3d import fading_polylines
-        path = np.column_stack([np.arange(10.0), np.zeros(10), np.zeros(10)])
-        mesh = fading_polylines([path], [(255, 255, 255)], fade_to="#000000", oldest=0.0)
-        rgb = mesh.point_data["rgb"]
+    def test_trail_fades_from_the_oldest_end_to_the_track_colour(self):
+        from visualization.quick3d.ribbon import fade
+        rgb = fade((255, 255, 255), 10, oldest=0.2)
         self.assertEqual(len(rgb), 10)
-        self.assertTrue(np.all(np.diff(rgb[:, 0].astype(int)) > 0), "older points must be dimmer")
-        np.testing.assert_array_equal(rgb[-1], [255, 255, 255])          # newest point: full colour
+        self.assertTrue(np.all(np.diff(rgb[:, 0]) > 0), "older segments must be dimmer")
+        np.testing.assert_allclose(rgb[-1], [255, 255, 255])     # newest segment: full colour
+        np.testing.assert_allclose(rgb[0], [51.0, 51.0, 51.0])   # oldest: 0.2 of the colour
+
+    def test_an_empty_trail_fades_to_nothing_rather_than_raising(self):
+        from visualization.quick3d.ribbon import fade
+        self.assertEqual(fade((255, 0, 0), 0).shape, (0, 3))
 
 
 if __name__ == "__main__":

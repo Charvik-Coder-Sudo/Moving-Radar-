@@ -19,16 +19,18 @@ from types import SimpleNamespace
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
 
-from rdp.packet import (FORMAT, MAX_SENSORS, PACKET_SIZE, STATE_FIELDS, PacketError,  # noqa: E402
-                        components, decode, encode_for_test)
+from rdp.packet import (AUTH_FRIEND, AUTH_UNKNOWN, FORMAT, ICAO_NONE,  # noqa: E402
+                        MAX_SENSORS, PACKET_SIZE, STATE_FIELDS, PacketError, components,
+                        decode, decode_icao, encode_for_test)
 
 # The producer's own ctypes definition, when this machine has the RDP project. It lives outside
 # this project, so the path is taken from MSDF_PACKET_PRODUCER (or the usual places beside the
 # project) and the cross-check is skipped when it is not there - it is a bonus, not a requirement.
 _PRODUCER_CANDIDATES = [
     Path(p) for p in [os.environ.get("MSDF_PACKET_PRODUCER", "")] if p
-] + [APP.parent / "Display" / "system_track_packet.py",
-     APP.parent / "MultiTrack" / "system_track_packet.py"]
+] + [parent / folder / "system_track_packet.py"
+     for parent in [APP.parent, *APP.parents]
+     for folder in ("Display", "MultiTrack")]
 PRODUCER = next((p for p in _PRODUCER_CANDIDATES if p.is_file()), _PRODUCER_CANDIDATES[-1])
 
 
@@ -48,11 +50,13 @@ def state(base):
     return [base + i + 0.25 for i in range(10)]
 
 
-def system_track(track_id=7, t=12.5, latest=2, fused=None, sensors=None):
+def system_track(track_id=7, t=12.5, latest=2, fused=None, sensors=None,
+                 auth="unknown", icao=None):
     """A stand-in with the attributes SystemTrackPacket.from_system_track reads."""
     sensors = {1: state(100.0), 2: state(200.0)} if sensors is None else sensors
     return SimpleNamespace(systemTrackId=track_id, time=t, latestSensor=latest,
-                           Xfused=fused if fused is not None else state(0.0), trackStateMap=sensors)
+                           Xfused=fused if fused is not None else state(0.0), trackStateMap=sensors,
+                           auth=auth, icao=icao)
 
 
 @unittest.skipUnless(PRODUCER.is_file(), f"producer definition not present: {PRODUCER}")
@@ -65,10 +69,38 @@ class TestAgainstProducer(unittest.TestCase):
         return self.mod.SystemTrackPacket.from_system_track(system_track(**kw)).to_bytes()
 
     def test_size_and_cap(self):
-        self.assertEqual(PACKET_SIZE, 436)
+        # 441 since the producer added the IFF identity fields (auth uint8 + icao uint32).
+        # Pinned against the producer's own struct below, so the two can never drift.
+        self.assertEqual(PACKET_SIZE, 441)
         self.assertEqual(ctypes.sizeof(self.mod.SystemTrackPacket), PACKET_SIZE)
         self.assertEqual(self.mod.MAX_SENSORS, MAX_SENSORS)
         self.assertEqual(self.mod.XFUSED_LEN, len(STATE_FIELDS))
+
+    def test_identity_survives_the_real_producer(self):
+        """The whole point of the interface: an IFF result decided in MultiTrack has to
+        arrive here unchanged. Encoded by the PRODUCER'S OWN code, decoded by ours."""
+        st = decode(self.packet(auth="friend", icao="0x000FA0"))
+        self.assertEqual(st.auth, "friend")
+        self.assertEqual(st.icao, "0x000FA0")                 # the source's own spelling
+
+    def test_a_track_with_no_iff_reply_carries_no_address(self):
+        st = decode(self.packet(auth="unknown", icao=None))
+        self.assertEqual(st.auth, "unknown")
+        self.assertIsNone(st.icao)
+
+    def test_the_producers_absent_marker_is_the_one_we_expect(self):
+        """Pins our ICAO_NONE against the producer's, so a change upstream fails here rather
+        than silently turning 'no address' into a real-looking one."""
+        self.assertEqual(self.mod.ICAO_NONE, ICAO_NONE)
+        self.assertEqual(self.mod.AUTH_FRIEND, AUTH_FRIEND)
+        self.assertEqual(self.mod.AUTH_UNKNOWN, AUTH_UNKNOWN)
+
+    def test_a_zeroed_icao_field_is_not_shown_as_an_address(self):
+        """0x000000 is not an assignable ICAO address, and it is what an unset field holds.
+        Upstream can emit it (see docs/IDENTITY.md, upstream note 3), so it must never reach
+        the operator looking like a real identity."""
+        self.assertIsNone(decode_icao(0x000000))
+        self.assertEqual(decode_icao(0x000FA0), "0x000FA0")
 
     def test_decode_producer_bytes(self):
         fused = [1.5, -2.0, 0.1, 30000.0, 250.0, -0.2, 0.01, 5000.0, 3.0, 0.0]
@@ -140,7 +172,7 @@ class TestDecoder(unittest.TestCase):
 
     def test_unused_slots_are_ignored(self):
         v = list(struct.unpack(FORMAT, self.good()))
-        v[18 + 10:] = [math.nan] * 30                              # slots 2..4 unused (numSensors = 1)
+        v[18 + 10:18 + 40] = [math.nan] * 30                       # slots 2..4 unused (numSensors = 1)
         v[15:18] = [99, 99, 99]
         st = decode(struct.pack(FORMAT, *v))
         self.assertEqual(st.sensor_ids, (1,))

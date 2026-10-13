@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pyvista as pv
 
+from visualization import terrain_noise as tn
+
 # ---------------------------------------------------------------------------- palette
 # Late-afternoon ground: enough light to read terrain, settlements and altitude, kept
 # desaturated so nothing here reaches the saturation of a classification colour.
@@ -55,12 +57,37 @@ LIGHT_EDGE = "#93a7c4"          # runway edge lights (cool, never a classificati
 LIGHT_THRESHOLD = "#7fb0a0"
 
 PARCEL_HASH = (127.1, 311.7)        # fixed multipliers: the farmland pattern never changes
+PARCEL_M = 1_500.0                  # typical field size before the grid is warped
+PARCEL_TINT = 0.26                  # how far a field strays from its neighbour
 SUN_DIRECTION = (0.55, -0.35, 0.62)  # the same sun the 3D view lights the scene with
 SHADE_GAIN = 1.8                     # slope exaggeration for relief shading only
 GROUND_LIFT = 1.25                   # baked exposure: daylight ground, not dusk
-HAZE_RGB = np.array([118.0, 140.0, 162.0])   # colour the distance fades into
-HAZE_START_M, HAZE_FULL_M = 55_000.0, 380_000.0
+HAZE_RGB = np.array([104.0, 126.0, 150.0])   # colour the distance fades into: the horizon sky
+HAZE_START_M, HAZE_FULL_M = 90_000.0, 420_000.0
+# The ownship cruises at 10 km, so EVERY piece of ground it can see is tens of kilometres
+# away. With haze that saturates, the whole world then arrives at one flat colour and the
+# landform stops reading. Holding a little of the ground's own colour at any distance is what
+# keeps a far range looking like a range instead of a band of fog.
+HAZE_MAX = 0.80
+HAZE_CURVE = 1.15                    # >1 keeps the near-middle distance clearer
 # level of detail: (half-span in metres, grid resolution) from the aircraft outwards
+# Feature wavelengths, in metres: the size each part of the landscape actually is on the
+# ground. They are deliberately tied to what an aircraft at 5-10 km can resolve.
+CONTINENT_M = 150_000.0         # land / sea, so a coastline falls outside the working area
+HOMELAND_M = 70_000.0           # the airspace the scenario uses is held above water
+RANGE_BELT_M = 44_000.0         # how far apart mountain BELTS run
+RIDGE_M = 12_000.0              # individual ranges within a belt
+HILL_M = 3_400.0
+PLAIN_M = 26_000.0
+RIVER_M = 30_000.0
+
+MOUNTAIN_H_M = 2_450.0          # highest crests, on a full belt
+HILL_H_M = 165.0
+PLAIN_BASE_M = 85.0
+PLAIN_RELIEF_M = 55.0
+RIVER_DEPTH_M = 240.0
+OFFSHORE_DEPTH_M = 260.0        # how far the seabed falls away past the coast
+
 TERRAIN_LODS = ((45_000.0, 300), (160_000.0, 260), (520_000.0, 200))
 TERRAIN_REBUILD_M = 12_000.0        # the near tile follows the aircraft in steps this size
 WATER_LEVEL_M = 45.0
@@ -73,49 +100,70 @@ def _hex(c):
     return np.array([int(c[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8)
 
 
-def _ridge(x, y, scale, phase):
-    """One ridged octave: |noise| inverted, which is what gives ranges their crests."""
-    n = _smooth_noise(x, y, scale, phase)
-    return 1.0 - np.abs(n)
+def _smoothstep(t, lo, hi):
+    """``t`` mapped from [lo, hi] to a smooth 0..1 ramp."""
+    u = np.clip((np.asarray(t, float) - lo) / (hi - lo), 0.0, 1.0)
+    return u * u * (3.0 - 2.0 * u)
 
 
 def base_relief(x, y):
-    """Procedural landscape, roughly 0 .. 2600 m. Visualisation only - see the module note.
+    """The landscape, in metres, before the sea is applied. Visualisation only.
 
-    Built the way terrain actually reads: a few ridged octaves for the mountain ranges, a
-    smooth low-frequency mask so ranges occupy part of the map and plains the rest, and small
-    octaves for foothills and surface texture.
+    Built in the order a real landscape is: first where there is land at all, then where the
+    ranges run, then the ranges themselves, then everything the weather does to them.
+
+        land mask    a slow field decides land from sea, so a COASTLINE emerges rather than
+                     being drawn. Biased to land over the scenario's own airspace - there is
+                     an airfield under it - and left to its own devices further out, which is
+                     where the coast appears.
+
+        range belts  warped, so ranges form BELTS that bend across the map instead of round
+                     blobs on a grid.
+
+        ridges       ridged multifractal: sharp crests, quiet valleys, fine detail only on
+                     high ground (terrain_noise.ridged). This is what the old sine-sum could
+                     not do, and the reason the ground used to read as a flat blur.
+
+        rivers       carved along the low line of a warped field, deepening as they descend,
+                     so valleys lead somewhere instead of being isolated dents.
+
+    Heights run from roughly -260 m (offshore) to about 2700 m on the highest crests.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
+    seed = tn.WORLD_SEED
 
-    # where mountains are allowed at all (0 = plain, 1 = full range), a slow field
-    region = _smooth_noise(x, y, 46000.0, 0.7)
-    mountains = np.clip(region * 1.5, 0.0, 1.0) ** 1.2
+    # --- land or sea ------------------------------------------------------------------
+    cont = tn.fbm(x / CONTINENT_M, y / CONTINENT_M, octaves=4, seed=seed + 1)
+    # the scenario flies over land: hold the mask up over its airspace and let the natural
+    # coastline happen beyond it, where it reads as scenery rather than as a hazard
+    home = np.exp(-(x * x + y * y) / (2.0 * HOMELAND_M * HOMELAND_M))
+    land = _smoothstep(cont + 0.75 * home, -0.10, 0.26)
 
-    # ranges every few kilometres: this is the scale an aircraft at 5-10 km actually sees
-    ridges = (820.0 * _ridge(x, y, 9500.0, 1.1)
-              + 380.0 * _ridge(x, y, 4200.0, 2.7)
-              + 170.0 * _ridge(x, y, 1900.0, 4.3)
-              + 70.0 * _ridge(x, y, 850.0, 6.1))
-    hills = (140.0 * _smooth_noise(x, y, 11000.0, 3.1)
-             + 60.0 * _smooth_noise(x, y, 3800.0, 5.9)
-             + 22.0 * _smooth_noise(x, y, 1400.0, 8.2))
-    plains = 55.0 + 55.0 * _smooth_noise(x, y, 30000.0, 9.4)
+    # --- where the ranges run ---------------------------------------------------------
+    bx, by = tn.warp(x / RANGE_BELT_M, y / RANGE_BELT_M, 0.55, seed=seed + 2, octaves=2)
+    belt = np.clip(tn.fbm(bx, by, octaves=3, seed=seed + 3) * 1.7 + 0.25, 0.0, 1.0)
 
-    h = plains + hills * (0.4 + 0.6 * mountains) + ridges * mountains
-    h = h - np.clip(0.4 - region, 0.0, 1.0) * 260.0          # basins between the ranges
-    # river valleys along the low-frequency minima: they carry the eye through the landscape
-    channel = 1.0 - np.abs(_smooth_noise(x, y, 21000.0, 11.3))
-    return np.maximum(h - np.clip((channel - 0.72) * 3.2, 0.0, 1.0) * 260.0, -40.0)
+    # --- the ranges themselves --------------------------------------------------------
+    rx, ry = tn.warp(x / RIDGE_M, y / RIDGE_M, 0.7, seed=seed + 4, octaves=2)
+    ranges = tn.ridged(rx, ry, octaves=5, seed=seed + 5)
 
+    hills = tn.fbm(x / HILL_M, y / HILL_M, octaves=4, seed=seed + 6)
+    plains = PLAIN_BASE_M + PLAIN_RELIEF_M * tn.fbm(x / PLAIN_M, y / PLAIN_M, octaves=3,
+                                                    seed=seed + 7)
 
-def _smooth_noise(x, y, scale, phase=0.0):
-    """Cheap deterministic smooth field in [-1, 1] (sums of incommensurate waves)."""
-    a = np.sin(x / scale + phase) * np.cos(y / (scale * 1.37) + phase * 0.7)
-    b = np.sin((x * 0.61 + y * 0.79) / (scale * 0.53) + phase * 1.9)
-    c = np.cos((x * -0.83 + y * 0.44) / (scale * 1.71) + phase * 0.3)
-    return (a + 0.6 * b + 0.45 * c) / 2.05
+    h = plains + HILL_H_M * hills * (0.35 + 0.65 * belt) + MOUNTAIN_H_M * ranges * belt
+
+    # --- rivers -----------------------------------------------------------------------
+    # A river cuts a valley, it does not flood the country: the carve is capped by how much
+    # height there is above the water to cut INTO, so it deepens through the hills and runs
+    # out as it reaches the plain instead of drowning it.
+    channel = 1.0 - np.abs(tn.fbm(x / RIVER_M, y / RIVER_M, octaves=3, seed=seed + 9))
+    headroom = np.clip(h - WATER_LEVEL_M - 20.0, 0.0, None) * 0.5
+    h = h - _smoothstep(channel, 0.80, 1.0) * np.minimum(RIVER_DEPTH_M, headroom)
+
+    # --- shelve into the sea ----------------------------------------------------------
+    return h * land - OFFSHORE_DEPTH_M * (1.0 - land)
 
 
 def hillshade(z, dx: float, dy: float, sun=SUN_DIRECTION) -> np.ndarray:
@@ -148,20 +196,31 @@ def land_cover(x, y, h):
     for k in range(3):
         out[..., k] = np.interp(h, stops, cols[:, k])
 
-    # farmland: parcels on a coarse grid, each a little lighter or darker than its neighbour
-    parcel = np.floor(x / 1700.0) * PARCEL_HASH[0] + np.floor(y / 1300.0) * PARCEL_HASH[1]
-    tint = ((np.sin(parcel * 12.9898) * 43758.5453) % 1.0 - 0.5) * 0.44
+    # Farmland: parcels, each a little lighter or darker than its neighbour, which is what
+    # gives low ground a texture to judge speed and height against.
+    #
+    # The grid is WARPED before it is quantised. Quantising x and y directly makes every field
+    # an axis-aligned rectangle of the same size, and over a plain that reads as a chequerboard
+    # laid on the landscape - the one thing that gave the old ground away as generated. Warped,
+    # the boundaries meander and the parcels vary, as field systems actually do.
+    px, py = tn.warp(x / PARCEL_M, y / PARCEL_M, 0.6, seed=tn.WORLD_SEED + 31, octaves=2)
+    parcel = np.floor(px) * PARCEL_HASH[0] + np.floor(py) * PARCEL_HASH[1]
+    tint = ((np.sin(parcel * 12.9898) * 43758.5453) % 1.0 - 0.5) * PARCEL_TINT
     farm = np.clip(1.0 - np.abs(h - 260.0) / 420.0, 0.0, 1.0)          # only on low, gentle ground
     out *= (1.0 + tint * farm)[..., None]
 
     # forest patches: they stop at the tree line, which is itself an altitude cue
-    wood = _smooth_noise(x, y, 9000.0, 2.1)
+    wood = tn.fbm(x / 9000.0, y / 9000.0, octaves=3, seed=tn.WORLD_SEED + 21)
     mask = np.clip((wood - 0.15) * 2.0, 0.0, 1.0) * np.clip(1.0 - np.abs(h - 450.0) / 800.0, 0.0, 1.0)
     out = out * (1 - mask[..., None]) + _hex(FOREST).astype(float) * mask[..., None]
 
-    # lakes: flat water wherever the terrain is at or below the water level
+    # Water, wherever the ground is at or below the water line. Shaded by DEPTH rather than
+    # painted one flat blue: the pale shelf against the dark deep is what reads as a coast,
+    # and it is the only cue that says which side of the shoreline you are looking at.
+    depth = np.clip((WATER_LEVEL_M - h) / 170.0, 0.0, 1.0)[..., None]
+    sea = _hex(SHALLOW).astype(float) * (1.0 - depth) + _hex(WATER).astype(float) * depth
     water = h <= WATER_LEVEL_M
-    out[water] = _hex(WATER)
+    out[water] = sea[water]
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -269,16 +328,31 @@ class Scenery:
         return np.random.default_rng(self.seed + sum(ord(c) * (i + 1) for i, c in enumerate(stream)))
 
     # ---------------------------------------------------------------- terrain
-    def height(self, x, y):
-        """Terrain height, levelled around the airfield so the runway sits on flat ground."""
+    def relief(self, x, y):
+        """True ground height, seabed included, levelled around the airfield.
+
+        Below the water line this keeps going down, which is what gives the sea its shallows
+        near the coast and its depth offshore. Use ``height`` for anything that has to sit ON
+        the surface.
+        """
         x, y = np.asarray(x, float), np.asarray(y, float)
-        h = np.maximum(base_relief(x, y), WATER_LEVEL_M - 12.0)
+        h = base_relief(x, y)
         d = np.hypot(x - self.airfield.center[0], y - self.airfield.center[1])
         # an airfield is levelled ground: dead flat over the field itself, then blended into
         # the surrounding relief - a runway on a 1 m slope is a runway nobody built
         t = np.clip((d - AIRFIELD_FLAT_M) / (AIRFIELD_BLEND_M - AIRFIELD_FLAT_M), 0.0, 1.0)
         w = 1.0 - t * t * (3.0 - 2.0 * t)                      # smoothstep, 1 inside the field
         return h * (1 - w) + self.airfield.elevation_m * w
+
+    def height(self, x, y):
+        """The surface that is actually DRAWN: the relief, with the sea as a flat plane.
+
+        Clamping the water to one exact level is what stops the LOD tiles disagreeing out at
+        the horizon. Two grids sampling a gently shelving seabed at 300 m and at 5 km cross
+        each other and break up into slabs; a plane at a constant height is identical at every
+        sampling rate, so the tiles agree exactly and the sea reads as sea.
+        """
+        return np.maximum(self.relief(x, y), WATER_LEVEL_M)
 
     def terrain(self, center, extent, n=420) -> pv.StructuredGrid:
         """One terrain tile. Kept for callers that want a single grid (the 2D map image)."""
@@ -310,16 +384,21 @@ class Scenery:
         toward haze rather than staying as vivid as the ground underfoot. Baking it into the
         vertex colours costs nothing per frame.
         """
-        Z = self.height(X, Y)
+        # the surface is drawn with a flat sea, but coloured from the true relief, so the
+        # shallows read differently from deep water and the coast has an edge
+        true_h = self.relief(X, Y)
+        Z = np.maximum(true_h, WATER_LEVEL_M)
         grid = pv.StructuredGrid(X, Y, Z)
         dx = float(abs(X[0, 1] - X[0, 0])) or 1.0
         dy = float(abs(Y[1, 0] - Y[0, 0])) or 1.0
-        rgb = land_cover(X.ravel(order="F"), Y.ravel(order="F"), Z.ravel(order="F")).astype(float)
+        rgb = land_cover(X.ravel(order="F"), Y.ravel(order="F"),
+                         true_h.ravel(order="F")).astype(float)
         shade = hillshade(Z, dx, dy).ravel(order="F")[:, None]
         out = rgb * shade * GROUND_LIFT
         centre = haze_centre if haze_centre is not None else (X.mean(), Y.mean())
         d = np.hypot(X.ravel(order="F") - centre[0], Y.ravel(order="F") - centre[1])
-        f = np.clip((d - HAZE_START_M) / (HAZE_FULL_M - HAZE_START_M), 0.0, 1.0)[:, None] ** 0.8
+        f = np.clip((d - HAZE_START_M) / (HAZE_FULL_M - HAZE_START_M), 0.0, 1.0)[:, None]
+        f = HAZE_MAX * f ** HAZE_CURVE
         grid.point_data["rgb"] = np.clip(out * (1 - f) + HAZE_RGB * f, 0, 255).astype(np.uint8)
         return grid
 

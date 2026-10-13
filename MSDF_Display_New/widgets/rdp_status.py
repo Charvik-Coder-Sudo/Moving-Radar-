@@ -91,11 +91,15 @@ class RdpStatusBar(QtWidgets.QFrame):
         """
         by_source: dict[str, int] = {}
         fused = 0
+        authenticated = 0
         for tv in views or []:
             if tv.stale:
                 continue
             if tv.kind == KIND_FUSED:
                 fused += 1
+                # counted on the SYSTEM track only: a fused track and its contributing sensor
+                # tracks are one aircraft, and counting each view would treble the figure
+                authenticated += int(tv.state.authenticated)
             else:
                 by_source[tv.state.source] = by_source.get(tv.state.source, 0) + 1
         sensor = sum(by_source.values())
@@ -106,6 +110,7 @@ class RdpStatusBar(QtWidgets.QFrame):
         self.fields["tracks"].setText(
             f"Sensor {sensor}" + (f" ({detail})" if detail else "")
             + f"  ·  Fused {fused}  ·  Total {sensor + fused}"
+            + (f"  ·  IFF friend {authenticated}" if authenticated else "")
             + (f"  (+{stale} stale)" if stale else ""))
 
     def _refresh_time(self):

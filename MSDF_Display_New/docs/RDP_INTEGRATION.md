@@ -24,6 +24,63 @@ MultiTrack\FusionEngineMultiTrack.py + FusionManager.py
 MSDF_Display_New                  ──► one receiver thread ──► TrackStore ──► 3D / 2D / PPI / table
 ```
 
+## The frame the track state is in
+
+**The state in a SystemTrack packet is a WORLD ENU position** - x East, y North, z Up, metres -
+not a radar-relative one. That is a property of the tracker, verified in its source:
+
+* `MultiTrack/imm3dc.py::Plot.calculateCartesian` builds a plot as
+  `x = r cos(phi) sin(theta)`, `y = r cos(phi) cos(theta)`, `z = r sin(phi)`, with `theta`
+  measured from North - that is ENU.
+* `Sensor/Moving_Sensor_Airborne.py::export_sensor_csv` writes `r/theta/phi` as the target's
+  spherical coordinates **about the world origin**, so that Cartesian position is the target's
+  world position. Measured: it equals the exported truth trajectory to **0.00 m over all 65 rows**.
+* `imm3dc.py` feeds `plot.pos[:2]` to the horizontal IMM and `plot.pos[2]` to the vertical one,
+  so the track state - and the fused `Xfused` built from it - stay in that global frame.
+
+So the display takes it as sent, and derives the aircraft-relative form the PPI needs:
+
+```
+world ENU      P_W = (x, y, z)                      as sent
+aircraft FRD   P_B = R_WB(t)^T (P_W - P_WA(t))      ownship pose at the packet time
+```
+
+| | FROM | TO | TRANSFORMATION | WHY |
+|---|---|---|---|---|
+| 3D / 2D | packet state | world ENU | identity | the tracker already works in world ENU |
+| PPI | world ENU | aircraft FRD | `R_WB^T (P_W - P_WA)` | the scope is aircraft-relative |
+| PPI velocity | world ENU | aircraft FRD | `R_WB^T v` | velocity is in the same frame as position |
+
+Velocities are never translated, only rotated. The PPI draws the aircraft nose-up, so no
+heading rotation is applied to a track - north is shown by a marker that sweeps the ring.
+
+### What this replaced, and what it cost
+
+Until 2026-10-05 the display read the state as a radar-frame line of sight and placed it with
+`P_WR + R_WR @ (y, x, -z)`. The algebra was right; the premise was not. Measured against the
+exported truth: tracks landed **17.7-20.5 km** away, PPI bearings were **~110 degrees** out, and
+the elevation sign was inverted - **+48 to +61 degrees where the truth was -9.5**. After the
+correction the same rows agree with an independent calculation from truth to **0.0000** in
+range, bearing, elevation and world position.
+
+It stayed hidden because SYSTEM 1 injects no measurement noise and MultiTrack associates plots
+to tracks by ground-truth `targetId`, so neither the filters nor the association ever complained.
+
+## Why a track can arrive and still not be drawn
+
+A track is stored, parsed and counted, and still not drawn, when:
+
+| Cause | What `TrackView.placement` says |
+|---|---|
+| no Scenario Export loaded | `...ownship pose is unknown` - world is known, the PPI position is not |
+| the packet time is outside the export | same - the 3D and 2D views still place it |
+
+A placed track is shown only while its packet time is within `live.world_track_window_s` (10 s)
+of the displayed time - `ViewController.world_tracks`.
+
+Note that an unrecognised `sensorId` no longer loses a track: the position came from the
+tracker, not from the reporting radar's mounting.
+
 ## 2. Endpoint
 
 | | |

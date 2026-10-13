@@ -28,7 +28,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from visualization.aircraft_ppi import AircraftPPI
 from visualization.view_2d import View2D
-from visualization.view_3d import View3D
+from visualization.view_3d_quick import QuickWorldView
 from widgets.aircraft_audio import AircraftAmbience
 from widgets.navigation_panel import NavigationPanel
 from widgets.ownship_panel import OwnshipPanel
@@ -148,7 +148,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(self.banner)
 
         # centre: ONE world view (3D or 2D) + playback bar
-        self.view3d = View3D(controller)
+        self.view3d = QuickWorldView(controller)
         self.view2d = View2D(controller)
         self.stack = QtWidgets.QStackedWidget()
         self.stack.addWidget(self.view3d)
@@ -169,8 +169,10 @@ class MainWindow(QtWidgets.QMainWindow):
         own_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         own_scroll.setWidget(OwnshipPanel(controller))
         right.addWidget(own_scroll)
+        # the PPI still leads, but the ownship block needs enough height for the attitude
+        # instrument to be visible without scrolling to it
         right.setStretchFactor(0, 3)
-        right.setStretchFactor(1, 1)
+        right.setStretchFactor(1, 2)
         right.setChildrenCollapsible(False)
         self.right_split = right
 

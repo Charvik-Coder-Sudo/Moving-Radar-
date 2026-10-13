@@ -85,9 +85,14 @@ def export_candidates(config_value=None) -> list[Path]:
     if config_value:
         out.append(resolve(config_value))
     out += [DATA_DIR / "Scenario_Export",          # a copy kept next to the application
-            PROJECT_ROOT.parent / "Scenario_Export",   # the simulation project beside it
-            PROJECT_ROOT / "Scenario_Export",
-            SAMPLE_DIR / "Scenario_Export"]
+            PROJECT_ROOT / "Scenario_Export"]
+    # The simulation project beside the application, or above it. Walking the ancestors
+    # matters when the display is installed inside its own repository: the export is not a
+    # sibling of the application then, it sits beside the repository. Only a folder that
+    # actually looks like an export is accepted (find_export -> looks_like_export), so an
+    # empty or unrelated "Scenario_Export" on the way up is skipped rather than chosen.
+    out += [parent / "Scenario_Export" for parent in PROJECT_ROOT.parents]
+    out.append(SAMPLE_DIR / "Scenario_Export")
     seen, unique = set(), []
     for p in out:
         if p not in seen:

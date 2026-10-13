@@ -1,5 +1,246 @@
 # Change log
 
+## 2026-10-05 (coordinate frames) - RDP track states are world ENU, not radar-relative
+
+A frame-interpretation error in the display. Nothing upstream was changed: MultiTrack, the
+Scenario Export and the RDP producer are untouched.
+
+### What was wrong
+The display read a SystemTrack's state as a radar-frame line of sight and placed it with
+`P_WR + R_WR @ (y, x, -z)`. The tracker does not work that way. Verified in its source:
+
+- `MultiTrack/imm3dc.py::Plot.calculateCartesian` builds `x = r cos(phi) sin(theta)`,
+  `y = r cos(phi) cos(theta)`, `z = r sin(phi)` with `theta` from North - x East, y North,
+  z Up.
+- `imm3dc.py` feeds `plot.pos[:2]` and `plot.pos[2]` straight to the IMM filters, so the
+  track state and the fused `Xfused` stay in that global frame.
+- The sensor CSV's `(x, y, z)` equals the exported truth trajectory to **0.00 m over all
+  65 rows**.
+
+Measured cost of the old reading, against truth: tracks **17.7-20.5 km** out of position,
+PPI bearings **~110 degrees** wrong, and the elevation sign inverted - **+48 to +61 degrees
+where the truth was -9.5**. It stayed hidden because SYSTEM 1 injects no measurement noise
+and MultiTrack associates plots by ground-truth `targetId`, so nothing upstream complained.
+
+### The correction
+- `processing/track_projection.py`: `rdp_to_frd` -> `rdp_to_world`. World position is the
+  state as sent; the aircraft-frame position the PPI needs is `R_WB^T (P_W - P_WA)` at the
+  packet time, from `ScenarioProcessor.ownship_at`.
+- `visualization/aircraft_ppi.py`: velocity vectors and track heading rotate by `R_WB^T`
+  (world -> body), not `R_BR` (radar -> body) - velocity is in the same frame as position.
+- An unrecognised `sensorId` no longer loses a track: a world position does not depend on
+  which radar reported it.
+
+### Validation
+Independent calculation from the exported truth against the display's own decode -> store ->
+project path, on real rows of `MultiTrack/Primary_Sensor.csv`: range, bearing, elevation and
+world position all agree to **0.0000**.
+
+**15 tests** in `tests/test_track_projection.py`, rewritten around the verified contract:
+the producer's spherical round trip, world placement, placement not depending on the
+reporting sensor, the ownship-relative body position, the PPI range being the true
+separation, the cross-view invariant (`frame_to_world(P_WA, R_WB, body) == world`), and the
+PPI convention - 0 deg nose, 90 deg right wing, measured in the **body** frame, which is not
+the same angle as a horizontal bearing once the aircraft is pitched or rolled.
+
+310 tests pass; `gui_smoke` 13/13.
+
+## 2026-09-30 (data integration) - RDP tracks reach the 3D world
+
+Nothing outside `MSDF_Display_New` was touched. MultiTrack, the Scenario Export and the RDP
+producer are unchanged.
+
+### Root cause: the Scenario Export was never found
+An RDP track carries a sensor-relative state, so the display places it with the **exported
+radar pose at the packet time**. With no export there is no pose, so every track was
+received, parsed, stored - and then silently dropped with `world = None`.
+
+Run from inside its own repository, the display resolved `../Scenario_Export` to an empty
+folder in the checkout, and the search looked only one level above the project while the real
+export sat three levels up beside the simulation. All four candidates failed.
+
+- `paths.export_candidates` now walks the project's ancestors, accepting only a folder that
+  actually looks like an export, so an empty `Scenario_Export` on the way up is skipped.
+- Verified end to end against the **real producer** (`TrackStreamer` -> `FusionEngine` ->
+  `127.0.0.1:9000`): packets received, tracks placed in world ENU, visible in the 3D view.
+  Before the fix the same run placed 0 of 14 tracks.
+- `docs/RDP_INTEGRATION.md` now states the three reasons a track can arrive and still not be
+  drawn, and which `TrackView.placement` message each produces.
+
+### 15 validation tests had been silently skipping
+`test_existing_compat`, `test_scenario_export` and `test_rdp`'s producer cross-check located
+their inputs at `APP.parent`, the same empty checkout folder, so every check against the real
+data and against MultiTrack's own packet definition was skipped. They now locate the export
+and the producer the way the application does. **Skips went from 16 to 1** (the remaining one
+is honest: this export contains no `Target_LOS/`). Now actually running and passing: ownship
+attitude and radar pose, roll fill, both scan schedules, and five packet-format checks against
+`system_track_packet.py`.
+
+- New `tests/test_export_discovery.py` (12 tests) pins the search: it walks past the
+  repository, skips an empty folder of the right name, keeps env > config precedence, and
+  terminates.
+
+### Verified against the real data
+Time is milliseconds in the export (`Time` 1.0 .. 57000.0 ms), seconds in the RDP packet
+(`time`, a double). `radar_pose` resolves across 0.001-57.0 s with `det(R_WR) = +1.000000`
+and `R R^T = I` for both sensors. MultiTrack's sensor logs span 3.39-53.86 s, entirely inside
+that window.
+
+## 2026-09-29 (renderer migration, step 4) - tracks, trails, symbols, labels, picking
+
+The world view now shows everything the operator reads. The VTK view is still the one the
+application uses and is untouched.
+
+### Lines have a width again
+- New `visualization/quick3d/ribbon.py`: Qt Quick 3D renders every line one pixel wide and
+  has no `lineWidth`, so each line is a strip of camera-facing quads whose width is given in
+  screen pixels. Measured in the running scene: a **fused trail draws at 2.67 px against a
+  sensor trail's 1.10** (asked for 2.6 and 1.1), a fused symbol outline at 2.82 against a
+  sensor's 1.62 (asked for 2.8 and 1.6). The rule that a fused system track outranks a sensor
+  track visually survives the migration.
+- **A bug worth recording**: width was first scaled by the Euclidean distance to the camera.
+  A perspective projection divides by the depth along the view axis, so a line off to one side
+  came out too wide - 12 % for a line 1 km off-axis at 1 km range. It now uses depth.
+- Long trails are thinned to 240 points before drawing: as a polyline that cost nothing, as
+  ribbons it is four vertices and two triangles a segment, rebuilt every frame.
+
+### Everything else in the picture
+- Track symbols (square for sensor, triangle for fused), trails for both kinds and for the
+  ownship, truth-target history, velocity vectors, the selection ring, and labels placed by
+  the same `stacked_offsets` the VTK view uses so co-located labels read as two lines.
+- Picking in screen pixels against the projected positions, not by ray: a track symbol is a
+  thin outline and an aircraft at range is a few pixels.
+- **31 new tests** (290 in total) for the ribbon geometry, the pixel width, the trail
+  thinning and the glyph outlines.
+
+### Frame cost, honestly
+6.85 ms of GUI thread per frame against the VTK view's 7.17 - **parity, not a win** - and the
+Quick view still does not draw the scenery objects, the DEBUG overlay or the HUD. The earlier
+"60 fps against 25" figures were a terrain-only scene measuring throughput, not GUI-thread
+work, and should not be quoted for the full picture. Measured per layer, there is no hotspot:
+eight ribbon layers at 0.24-0.83 ms each. Batching them is the remaining work.
+
+## 2026-09-29 (renderer migration, step 3) - ownship, targets, coverage and the beam
+
+The world view now has aircraft and radar geometry in it. The VTK view is still the one the
+application uses and is untouched.
+
+- Each aircraft mesh is uploaded **once** in its body frame and every aircraft in the scene
+  is that mesh placed by a node transform (`transform.node_rotation`). A target that moves
+  costs a position, a quaternion and a scale - no vertex is re-sent. Coverage volumes are
+  built once per sensor in radar FRD and moved the same way; the beam pyramid is refilled
+  only when the dwell actually changes.
+- Verified in a running scene: the ownship node rotation matches the body-to-renderer chain
+  to 7.6e-08, the nose points where the flown path says, the ownship is drawn at the pixel it
+  projects to, the radar sits at the exported `P_WR`, and the beam follows the scan schedule.
+- **Node pool instead of a rebuilt model.** Replacing a `Repeater3D`'s model every frame makes
+  QML destroy and recreate every delegate: measured at **5.73 ms per frame** for four targets
+  and two sensors, against 1.58 ms for the same work profiled in isolation. Nodes are now
+  created once and addressed by name, and the frame cost fell to **1.53 ms**.
+- **Blending corrected.** Coverage and beam were first drawn with a Screen blend, which adds
+  light and washed the picture out at volume scale. They now use plain alpha at the same
+  opacities the VTK view uses, imported rather than copied so the two cannot drift apart.
+- **5 new tests** (259 in total) for the node rotation: that it is the whole body-to-renderer
+  chain, that a nose in the body frame ends up where the attitude points it, and that it
+  never mirrors.
+
+## 2026-09-29 (renderer migration, step 2) - the ground world
+
+`visualization/view_3d_quick.py`: `QuickWorldView` builds the terrain, sky, atmospheric depth
+and lighting, follows the aircraft, places the camera and answers the layer switches. The VTK
+view is still the one the application uses and is untouched.
+
+- Verified side by side against the VTK view, same controller and same frame: both build 3
+  terrain tiles from the same 197,600 vertices, the terrain re-centres 60 km across the
+  scenario and stays under the aircraft, and Show Scenery still works.
+- **Terrain LOD tiles no longer interpenetrate.** The three tiles cover the same ground at
+  300 m, 1.2 km and 5.2 km and the overlap broke the picture into blocks. Each coarse tile
+  now keeps only the ring outside the finer one (`transform.ring_triangles`), re-cut whenever
+  the near tile re-centres so no gap opens beside it.
+- **A correction worth recording**: the first fix for that - raising the near clipping plane
+  from 20 m to 400 m - looked right on screen and was wrong. Measuring it showed the
+  high-frequency energy in the picture went only 0.186 to 0.176 (a single tile scores 0.097);
+  the cleaner-looking image was a different camera angle. Crossing surfaces are a geometry
+  problem, not a depth-precision one.
+- `style.rgb255` added beside `rgb01`: the geometry bridge and `scenery`'s vertex colours
+  both work in 0-255.
+- **7 new tests** (254 in total) for the LOD ring cut: the covered middle removed, the ring
+  kept whole, the hole following the aircraft rather than the origin, and elevation not
+  affecting which triangles a tile keeps.
+
+Known and NOT caused by this work: the near terrain shows faint square patches where the
+land-cover colouring meets the 300 m grid. That is in `scenery.py` and is present under VTK
+too.
+
+## 2026-09-29 (renderer migration, step 1) - the geometry bridge
+
+The first step of the move to Qt Quick 3D. New code only: the VTK world view is untouched and
+still the one the application uses. Plan and measurements:
+[docs/RENDERER_MIGRATION.md](docs/RENDERER_MIGRATION.md).
+
+### New: `visualization/quick3d/`
+- `transform.py` - the world-to-renderer mapping `(East, Up, -North)`, the mesh maths that
+  depends on it, the camera basis and the screen projection. Pure numpy, no Qt, so the parts
+  that fail silently can be tested directly.
+- `geometry.py` - `MeshGeometry` and `LineGeometry`: numpy arrays packed into interleaved
+  vertex buffers and registered as QML types.
+- `scene.qml` - the scene graph. Nothing in it decides where anything is; every geometry
+  object is filled from Python by objectName, and the camera is placed from the same basis
+  the label projection uses, so what is drawn and where a label goes cannot disagree.
+
+### Tests
+- **59 new tests** (247 in total). The frame mapping and its determinant, the eight
+  validation attitudes, the winding fix, the camera basis and its quaternion, the projection,
+  and the packed GPU buffers read back and checked field by field.
+- Verified in a real render: projecting the ownship and sampling the rendered framebuffer at
+  that pixel finds 89 % of the patch is aircraft.
+
+### Renderer limitations found and documented
+- **Qt Quick 3D has no line width** - `Model.lineWidth` does not exist, every line is one
+  pixel. The display uses line weight to say that a fused track outranks a sensor track, so
+  steps 3 and 4 will generate camera-facing ribbons instead of line primitives.
+- Device pixel ratio is 1.5 here: the projection returns logical pixels for labels, and
+  anything sampling the framebuffer must scale.
+- Qt Quick only repaints when the scene changes, so a frame rate measured on a static scene
+  is meaningless. Every figure quoted was measured with something moving.
+
+## 2026-09-29 (renderer audit) - what the machine can do, what the data holds, and the decision
+
+Read-only audit and a rendering-technology decision. No application behaviour changed; the
+only files added are documentation. Full record: [docs/RENDERER_MIGRATION.md](docs/RENDERER_MIGRATION.md).
+
+### The machine sets the ceiling
+- Intel integrated graphics, no discrete GPU, 2 GB shared, OpenGL 4.5, on a 15 W Core 7 150U.
+  Presentation quality of the order of a modern Unreal aerospace simulation is not reachable
+  on this hardware with any renderer, and the documentation now says so plainly.
+
+### The data holds more than the display shows
+- `Scenario_Export/IFF/IFF_Replies.csv` carries **653 real IFF replies** with ICAO addresses -
+  target 3 and 4 Friend and authenticated, **target 5 Foe and not authenticated** - and no part
+  of the display reads the file. Every track is drawn "Unknown" today. This is the largest gap
+  in the application and it is not a rendering problem.
+- The per-target `Auth` column and the replies file disagree for target 4. The replies are the
+  time-varying authoritative record; the column is a static scenario attribute. Documented so
+  the two are never conflated.
+- **There are no detections or measurements anywhere in the Scenario Export.** A detection
+  visualization cannot be drawn without inventing data.
+
+### Renderer: Qt Quick 3D, and a correction
+- The first recommendation was to keep VTK, reasoning that both libraries reach the same GPU
+  the same way. That reasoning was wrong: VTK renders through OpenGL, Qt Quick 3D on Windows
+  through **Direct3D 11**, the better-supported path on Intel graphics. Measured on the same
+  197,600-point terrain with the camera moving: **~25 fps under VTK, 60 fps under Qt Quick 3D**,
+  and 62.6 fps with line geometry rebuilt every frame.
+- Phase 3 proved, against the project's own modules: embedding in a QWidget layout, terrain and
+  aircraft as custom geometry from numpy with per-vertex colour, the existing
+  `attitude.body_to_world` and `chase_pose` driving it unchanged, translucent coverage from the
+  real `SensorConfig`, 3D-anchored labels, picking, and per-frame geometry rebuild at a median
+  of 0.74 ms.
+- The ENU→renderer transform is `(East, Up, −North)`, determinant +1, so handedness is
+  preserved and nothing is mirrored. It lives in one place.
+- Surfaced a real defect on the way: PyVista winds terrain faces so their normals point down,
+  which VTK hid by lighting both sides and Qt Quick 3D exposed by culling the whole terrain.
+
 ## 2026-09-29 (3D redesign, increments E and F) - the camera, and the panels around it
 
 No radar mathematics, coordinate convention, fusion logic, RDP packet handling, Scenario Export

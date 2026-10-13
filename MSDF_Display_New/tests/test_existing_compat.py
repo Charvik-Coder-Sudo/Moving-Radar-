@@ -20,7 +20,12 @@ sys.path.insert(0, str(APP))
 from models.sensor_state import SensorConfig                        # noqa: E402
 from msdf_math import attitude, coordinates, kinematics             # noqa: E402
 
-EXPORT = ROOT / "Scenario_Export"
+import paths  # noqa: E402
+
+# Located the way the application locates it. Hard-coding ROOT / "Scenario_Export" silently
+# skipped every check in this file when the display ran from inside its own repository: the
+# checkout holds an empty Scenario_Export and the real one sits above it.
+EXPORT = paths.find_export()[0] or (ROOT / "Scenario_Export")
 
 
 def need(*paths):
@@ -67,10 +72,24 @@ class TestScanScheduleMatchesExisting(unittest.TestCase):
 class TestAttitudeMatchesExisting(unittest.TestCase):
     @need(EXPORT / "3D Trajectory" / "Ownship_Primary_Radar.csv")
     def test_ownship_attitude_and_radar_pose(self):
+        """The export's Yaw / Pitch / Roll and the radar pose built from them.
+
+        The Vx / Vy columns are transposed with respect to X / Y upstream: Vx carries the
+        NORTH component and Vy the EAST one. Measured on every trajectory file in the export,
+        Vx matches dY/dt to 0.005 m/s and Vy matches dX/dt to 0.000 m/s, while reading the
+        columns as labelled is 220-424 m/s wrong (see msdf_math.motion). The export's Yaw is
+        atan2(Vy, Vx), so read through that swap it is a compass course - which is why it
+        agrees with the recorded path (asserted separately below).
+
+        This pins the relationship the data actually has rather than the one the column names
+        suggest, so a future upstream change to either fails here instead of silently turning
+        the aircraft's nose away from the direction it flies.
+        """
         df = pd.read_csv(EXPORT / "3D Trajectory" / "Ownship_Secondary_Radar.csv", nrows=5000).iloc[::97]
         cfg = existing_sensor(1)
         for _, r in df.iterrows():
-            yaw = float(kinematics.yaw_from_velocity_deg(r["Vx"], r["Vy"]))
+            yaw = float(kinematics.yaw_from_velocity_deg(r["Vy"], r["Vx"]))   # Vy East, Vx North
+            # pitch is invariant under the swap: it uses Vz against the horizontal magnitude
             pitch_fp = float(kinematics.pitch_from_velocity_deg(r["Vx"], r["Vy"], r["Vz"]))
             self.assertAlmostEqual(yaw, r["Yaw"], places=6)
             # existing pipeline pitch = flight path + 10 deg angle of attack
@@ -81,6 +100,23 @@ class TestAttitudeMatchesExisting(unittest.TestCase):
             y, p, rl = attitude.frd_to_ypr(R_WB @ cfg.R_BR)
             np.testing.assert_allclose([y, p, rl], [r["Radar_Yaw"], r["Radar_Pitch"], r["Radar_Roll"]],
                                        atol=1e-6)
+
+    @need(EXPORT / "3D Trajectory" / "Ownship_Secondary_Radar.csv")
+    def test_the_exported_yaw_points_along_the_flown_path(self):
+        """The check that actually matters: does the nose point where the aircraft goes?
+
+        Taken against the recorded POSITIONS, which are the authoritative record - every
+        radar measurement in the export is built from them. Positions are stored to 0.1 m, so
+        a course differentiated from them carries that much quantisation; the tolerance is
+        set by that and not by anything in the display.
+        """
+        d = pd.read_csv(EXPORT / "3D Trajectory" / "Ownship_Secondary_Radar.csv")
+        t = d["Time"].to_numpy() / 1000.0
+        east = np.gradient(d["X"].to_numpy(), t)
+        north = np.gradient(d["Y"].to_numpy(), t)
+        course = np.degrees(np.arctan2(east, north)) % 360.0
+        gap = np.abs(((d["Yaw"].to_numpy() - course + 180.0) % 360.0) - 180.0)
+        self.assertLess(gap.max(), 0.05, "exported Yaw has left the flown path")
 
     @need(EXPORT / "3D Trajectory" / "Ownship_Primary_Radar.csv")
     def test_existing_roll_is_zero_filled(self):

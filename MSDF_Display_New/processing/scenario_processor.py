@@ -144,11 +144,20 @@ class ScenarioProcessor:
         if i < 0:
             return None
         pos, vel = tg.pos[i], tg.vel[i]
+        # GROUND TRUTH, not a track. ``classification`` is the scenario's own Auth column for
+        # this target, which is what the aircraft IS - not what any sensor worked out. It is
+        # kept because it is the only yardstick for judging whether the tracker identified a
+        # target correctly, and source="TRUTH" is what keeps the two apart everywhere it is
+        # shown.
+        #
+        # auth and icao are deliberately left empty. They mean "an IFF interrogation returned
+        # this", and no interrogation happened here - filling them from truth would manufacture
+        # an authentication the system never performed. See docs/IDENTITY.md.
         st = TrackState(timestamp=float(tg.t_ms[i]) / 1000.0, track_id=f"T{tg.target_id}",
                         target_id=str(tg.target_id), x=float(pos[0]), y=float(pos[1]), z=float(pos[2]),
                         vx=float(vel[0]), vy=float(vel[1]), vz=float(vel[2]), omega=np.nan,
                         ax=np.nan, ay=np.nan, az=np.nan, classification=tg.auth, source="TRUTH",
-                        status="scenario", row=i)
+                        status="scenario", auth="", icao=None, row=i)
         idx = self._trail_idx[tg.target_id]
         rows = idx[:np.searchsorted(idx, i, side="right")]
         trail = np.vstack([tg.pos[rows], pos[None]])

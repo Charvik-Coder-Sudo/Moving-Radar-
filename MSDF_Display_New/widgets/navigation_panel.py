@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
-from visualization.view_3d import CAMERA_PRESETS
+from visualization.camera import CAMERA_PRESETS
 from widgets.legend_widget import LegendWidget
 from widgets.sensor_panel import SensorPanel
 

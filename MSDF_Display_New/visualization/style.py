@@ -53,6 +53,22 @@ _ALIASES = {
 }
 
 
+def classification_from_auth(auth) -> str:
+    """MultiTrack's IFF result -> this display's classification vocabulary.
+
+    MultiTrack decides identity with ONE field holding "friend" or "unknown", and nothing
+    else: ``plotCluster.processDetectionsFile`` maps the secondary sensor's ``Auth`` column to
+    exactly those two words, and no part of the tracker ever produces a hostile or a neutral.
+    So HOSTILE and NEUTRAL are simply unreachable from a live track, and the display must not
+    invent a route to them. They remain reachable only from Scenario Export truth, which is
+    labelled as truth wherever it is shown.
+
+    "unknown" means no IFF reply was received. That is the absence of evidence, not evidence
+    of hostility, which is why it maps to Unknown and never to Hostile.
+    """
+    return FRIENDLY if str(auth).strip().lower() == "friend" else UNKNOWN
+
+
 def classify(raw) -> ClassStyle:
     """Canonical classification style for a track-file value (case-insensitive)."""
     return CLASSIFICATIONS[_ALIASES.get(str(raw).strip().upper(), UNKNOWN)]
@@ -77,7 +93,7 @@ class SourceStyle:
     size: int           # px
     pen_width: float
     dashed: bool
-    glyph_3d: str       # 3D camera-facing outline (see visualization.tracks_3d)
+    glyph_3d: str       # 3D camera-facing outline (visualization.quick3d.ribbon)
 
 
 SOURCES: dict[str, SourceStyle] = {
@@ -144,3 +160,9 @@ def hex_to_rgb(h: str) -> tuple[int, int, int]:
 def rgb01(h: str) -> tuple[float, float, float]:
     r, g, b = hex_to_rgb(h)
     return r / 255.0, g / 255.0, b / 255.0
+
+
+def rgb255(h: str) -> tuple[int, int, int]:
+    """0-255 components, which is what the Qt Quick 3D geometry bridge and
+    ``visualization.scenery``'s vertex colours both use."""
+    return hex_to_rgb(h)

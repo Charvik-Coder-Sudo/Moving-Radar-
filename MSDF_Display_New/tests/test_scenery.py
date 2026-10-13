@@ -87,9 +87,30 @@ class TestTerrain(unittest.TestCase):
         rgb = scenery.land_cover(X.ravel(), Y.ravel(), Z.ravel())
         self.assertEqual(rgb.dtype, np.uint8)
         self.assertEqual(len(rgb), X.size)
-        low = scenery.land_cover(np.array([0.0]), np.array([0.0]),
-                                 np.array([scenery.WATER_LEVEL_M - 1.0]))
-        np.testing.assert_array_equal(low[0], scenery._hex(scenery.WATER))
+        # Below the water line the ground is sea, shaded by depth: the shelf is pale and the
+        # deep is dark, which is what gives a coastline an edge you can see.
+        shelf = scenery.land_cover(np.array([0.0]), np.array([0.0]),
+                                   np.array([scenery.WATER_LEVEL_M - 1.0]))[0]
+        deep = scenery.land_cover(np.array([0.0]), np.array([0.0]),
+                                  np.array([scenery.WATER_LEVEL_M - 400.0]))[0]
+        np.testing.assert_allclose(shelf, scenery._hex(scenery.SHALLOW), atol=2)
+        np.testing.assert_array_equal(deep, scenery._hex(scenery.WATER))
+        self.assertLess(int(deep.sum()), int(shelf.sum()), "deep water must read darker")
+
+    def test_the_sea_is_one_flat_level_at_every_sampling_rate(self):
+        """Why this matters: the LOD tiles sample the same ground at 300 m and at 5 km. A
+        shelving seabed sampled twice gives two surfaces that CROSS, which is what broke the
+        horizon into slabs. A plane is identical however coarsely it is sampled."""
+        w = world()
+        fine_x, fine_y = np.meshgrid(np.linspace(-3e5, 3e5, 220), np.linspace(-3e5, 3e5, 220))
+        coarse_x, coarse_y = fine_x[::11, ::11], fine_y[::11, ::11]
+        fine, coarse = w.height(fine_x, fine_y), w.height(coarse_x, coarse_y)
+        sea_fine = fine[fine <= scenery.WATER_LEVEL_M + 1e-9]
+        self.assertGreater(sea_fine.size, 0, "this map should reach the sea")
+        np.testing.assert_allclose(sea_fine, scenery.WATER_LEVEL_M)
+        # and the two samplings agree exactly wherever both are sea
+        both = (fine[::11, ::11] <= scenery.WATER_LEVEL_M) & (coarse <= scenery.WATER_LEVEL_M)
+        np.testing.assert_allclose(fine[::11, ::11][both], coarse[both])
 
     def test_nothing_in_the_scenery_reaches_a_classification_colour(self):
         """Scenery must never be mistaken for a Friendly / Hostile / Neutral / Unknown symbol."""

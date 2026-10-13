@@ -127,15 +127,19 @@ def describe_track(tv, palette: style.Palette, geometry: tuple, geometry_note: s
     grey = "<span style='color:#94a3b8'>{}</span>"
     rdp = getattr(tv, "origin", "") == "rdp"
     cls_text = f"<b style='color:{cls.color}'>■ {cls.label}</b>"
-    if rdp and not raw:
-        cls_text += " " + grey.format("(not in packet)")
+    if rdp and st.auth:
+        # say WHERE it came from: this is a tracker result, not the display's opinion
+        cls_text += " " + grey.format(f"(IFF: {html.escape(st.auth)})")
     elif raw.upper() != cls.key:
         cls_text += " " + grey.format(f"(file: {html.escape(raw) or '—'})")
     target = html.escape(st.target_id) if st.target_id else grey.format("— (not in packet)" if rdp else "—")
+    icao = html.escape(st.icao) if st.icao else grey.format("—")
     rows = [
         ("Track ID", html.escape(st.track_id)),
         ("Target ID", target),
+        ("ICAO", icao),
         ("Classification", cls_text),
+        ("Authentication", html.escape(st.auth_label)),
         ("Source", f"{html.escape(st.source)} · {src.label}"),
         ("Range", _fmt(rng, ",.0f", " m")),
         ("Azimuth", _fmt(az, ".1f", "°") + f" <span style='color:#94a3b8'>({geometry_note})</span>"),
@@ -191,7 +195,10 @@ def describe_target(tv) -> str:
     cls = style.classify(st.classification)
     auth = html.escape(st.classification) if st.classification else "not exported"
     rows = [("Target ID", html.escape(st.target_id)),
-            ("Classification", f"<b style='color:{cls.color}'>&#9632; {cls.label}</b> " + GREY.format(f"(Auth: {auth})"))]
+            ("ICAO", GREY.format("&mdash; not interrogated (ground truth)")),
+            ("Classification", f"<b style='color:{cls.color}'>&#9632; {cls.label}</b> "
+                               + GREY.format(f"(scenario Auth: {auth})")),
+            ("Authentication", GREY.format("&mdash; truth is not an IFF result"))]
     iff_on, iff_key = tv.meta.get("IFF enabled", ""), tv.meta.get("IFF key", "")
     if iff_on:
         rows.append(("IFF", html.escape(iff_on) + (f" &middot; key {html.escape(iff_key)}" if iff_key else "")))

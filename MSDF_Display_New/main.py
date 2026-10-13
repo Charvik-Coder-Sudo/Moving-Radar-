@@ -153,12 +153,18 @@ def main(argv=None) -> int:
 
     from PySide6 import QtCore, QtWidgets
 
+    from PySide6 import QtGui
+
     from visualization.view_controller import ViewController
     from widgets.main_window import MainWindow
     from widgets.theme import QSS
 
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    # The 3D view's surface format has to be chosen before the application exists; set
+    # afterwards it is ignored and the scene loses multisampling.
+    from visualization.view_3d_quick import surface_format
+    QtGui.QSurfaceFormat.setDefaultFormat(surface_format())
     app = QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName("MSDF Radar Display")
     app.setStyleSheet(QSS)
@@ -186,7 +192,7 @@ def main(argv=None) -> int:
         out = Path(args.screenshot)
         win.screen().grabWindow(win.winId()).save(str(out))
         if args.view == "3d" and ctrl.is_ready:
-            win.view3d.plotter.screenshot(str(out.with_name(out.stem + "_3d.png")))
+            win.view3d.grab_image().save(str(out.with_name(out.stem + "_3d.png")))
         print(f"saved {out}")
         app.quit()
 

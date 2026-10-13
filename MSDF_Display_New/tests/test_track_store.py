@@ -59,9 +59,20 @@ class TestMapping(unittest.TestCase):
     def test_nothing_invented(self):
         for tv in self.views.values():
             self.assertEqual(tv.state.target_id, "")              # a sensor id is not a target id
-            self.assertEqual(tv.state.classification, "")
             self.assertEqual(tv.origin, "rdp")
             self.assertEqual(tv.system_track_id, 7)
+
+    def test_identity_is_the_packet_value_and_only_the_packet_value(self):
+        """These packets carry no IFF, so every track must read as unknown with no address.
+
+        The point is not that the field is empty - it is that the display took "unknown" FROM
+        THE PACKET rather than deciding anything. A fabricated ICAO would show up here.
+        """
+        for tv in self.views.values():
+            self.assertEqual(tv.state.auth, "unknown")
+            self.assertIsNone(tv.state.icao)
+            self.assertEqual(tv.state.classification, "UNKNOWN")
+            self.assertFalse(tv.state.authenticated)
 
     def test_geometry(self):
         store = TrackStore(CFG, NAMES)

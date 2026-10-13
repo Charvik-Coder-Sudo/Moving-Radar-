@@ -2,6 +2,10 @@
 
 Values are the exported ones. The export has no acceleration or turn rate, so
 those are shown as "not in export" rather than estimated.
+
+The attitude indicator at the top draws the same exported Yaw / Pitch / Roll as a horizon
+(widgets.attitude_indicator). It is an addition to the figures below, not a replacement:
+the numbers remain the record, and the instrument never shows anything they do not.
 """
 
 from __future__ import annotations
@@ -9,6 +13,8 @@ from __future__ import annotations
 import math
 
 from PySide6 import QtCore, QtWidgets
+
+from widgets.attitude_indicator import AttitudeIndicator
 
 
 class OwnshipPanel(QtWidgets.QFrame):
@@ -38,6 +44,10 @@ class OwnshipPanel(QtWidgets.QFrame):
         self.header = QtWidgets.QLabel("—", objectName="ViewInfo")
         self.header.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         lay.addWidget(self.header)
+        # The same exported Yaw / Pitch / Roll as the grid below, read as an attitude. Added
+        # beside the numbers, never instead of them: the figures stay the record.
+        self.attitude = AttitudeIndicator(self)
+        lay.addWidget(self.attitude, 0, QtCore.Qt.AlignLeft)
         grid = QtWidgets.QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(0)
@@ -72,6 +82,7 @@ class OwnshipPanel(QtWidgets.QFrame):
 
     def _blank(self, text):
         self.header.setText(text)
+        self.attitude.set_ownship(None)
         for v in self.values.values():
             v.setText("—")
 
@@ -83,6 +94,8 @@ class OwnshipPanel(QtWidgets.QFrame):
         if own is None:
             self._blank("no ownship row at this time")
             return
+        self.attitude.set_ownship(own, (frame.attitude or {}).get("estimated_bank_deg",
+                                                                  math.nan))
         self.header.setText(f"export row t = {own.timestamp_ms:.1f} ms  ({own.timestamp:.3f} s)")
         f = lambda x, p=1: "not in export" if not math.isfinite(x) else f"{x:,.{p}f}"   # noqa: E731
         vh = math.hypot(own.vx, own.vy)

@@ -6,7 +6,8 @@ same layer switches as the PPI, so the table lists exactly what the PPI draws.
 
 State values are the packet values, in the RDP's sensor-relative frame
 (x Right, y Forward, z Up). Columns marked * are derived by the display. The
-packets carry no classification and no target id: those show as Unknown and "—".
+packets carry no target id, so that shows as "—". Classification, authentication and the
+ICAO address DO come from the packet (rdp.packet) and are never worked out here.
 
 Two column sets: Essentials, what is read while watching the picture, and All
 columns, which adds the raw packet state. The rows are identical in both - the
@@ -39,9 +40,21 @@ def _association(tv) -> str:
 COLUMNS = [
     ("Track ID", lambda tv: tv.state.track_id, None,
      "Fused: ST<systemTrackId>. Sensor: ST<systemTrackId>:S<sensorId> (from the packet)"),
+    ("Packet time", lambda tv: tv.state.timestamp, "{:.6f}",
+     "SystemTrack 'time' exactly as sent (RDP: seconds). The time this row IS - not the "
+     "time it was drawn"),
     ("Target ID", lambda tv: tv.state.target_id or "—", None, "Not in the RDP packet"),
+    ("ICAO", lambda tv: tv.state.icao or "—", None,
+     "The 24-bit address the IFF interrogation returned, exactly as the source spells it. "
+     "— means this track has none: truth targets are not interrogated, and an unknown "
+     "track is one that did not reply."),
     ("Classification", lambda tv: style.classify(tv.state.classification).label, None,
-     "Not in the RDP packet - shown as Unknown"),
+     "From the packet's IFF result (friend -> Friendly, unknown -> Unknown). "
+     "MultiTrack makes no hostile or neutral determination, so a live track is only ever "
+     "Friendly or Unknown. Truth targets show the scenario's own Auth column."),
+    ("Authentication", lambda tv: tv.state.auth_label, None,
+     "Whether an IFF interrogation authenticated this track, which is WHY it is classified "
+     "as it is. 'No IFF reply' is the absence of an answer, not evidence against."),
     ("Source", lambda tv: tv.state.source, None, "FUSED (Xfused) or the sensor of sensorIds; the icon shows the type"),
     ("X (m)", lambda tv: tv.state.x, "{:.1f}", "x: Right (sensor-relative, packet)"),
     ("Y (m)", lambda tv: tv.state.y, "{:.1f}", "y: Forward (sensor-relative, packet)"),
@@ -59,17 +72,23 @@ COLUMNS = [
     ("Elevation* (°)", lambda tv: tv.elevation_deg, "{:+.2f}", "Derived: atan2(z, horizontal)"),
     ("Status*", lambda tv: tv.state.status, None, "Display lifetime: ACTIVE or STALE (stale timeout)"),
     ("Sensors / system", _association, None, "Association carried in the packet - never inferred"),
-    ("Packet time", lambda tv: tv.state.timestamp, "{:.6f}", "SystemTrack 'time' exactly as sent (RDP: seconds)"),
     ("Age* (s)", lambda tv: tv.age_s, "{:.1f}", "Wall-clock seconds since this system track was last updated"),
 ]
-COL_CLASS = 2
-COL_SOURCE = 3
+def _column(name: str) -> int:
+    """Position of a column by header. Derived rather than written down, so reordering the
+    table cannot leave a stale index colouring the wrong cell."""
+    return next(i for i, (header, *_rest) in enumerate(COLUMNS) if header == name)
+
+
+COL_CLASS = _column("Classification")
+COL_SOURCE = _column("Source")
 # Twenty-two columns at once is a wall of numbers. ESSENTIALS is what an operator reads while
 # watching the picture: identity, what the sensor sees, and whether the track is current. The
-# raw packet state (x/y/z, velocity, acceleration, turn rate, packet time) is one choice away
+# raw packet state (x/y/z, velocity, acceleration, turn rate) is one choice away
 # and nothing is dropped - these are the same rows either way.
-ESSENTIALS = ("Track ID", "Classification", "Source", "Speed* (m/s)", "Range* (m)",
-              "Azimuth* (°)", "Elevation* (°)", "Status*", "Sensors / system", "Age* (s)")
+ESSENTIALS = ("Track ID", "Packet time", "ICAO", "Classification", "Authentication",
+              "Source", "Speed* (m/s)", "Range* (m)", "Azimuth* (°)", "Elevation* (°)",
+              "Status*", "Sensors / system", "Age* (s)")
 COLUMN_SETS = (("Essentials", ESSENTIALS), ("All columns", None))
 
 
@@ -139,7 +158,7 @@ class TrackTableModel(QtCore.QAbstractTableModel):
             cs = style.classify(tv.state.classification)
             return (f"{tv.state.source}/{tv.state.track_id} · "
                     f"{self.palette.source_style(tv.kind, tv.state.source).label} · "
-                    f"{cs.label} (classification not in packet) · "
+                    f"{cs.label} · "
                     f"packet time {tv.state.timestamp:.6f} · updated {tv.age_s:.1f} s ago · {tv.frame}")
         return None
 
