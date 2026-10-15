@@ -35,6 +35,10 @@ STATE_LEN = 10
 STATE_FIELDS = ("x", "vx", "ax", "y", "vy", "ay", "w", "z", "vz", "az")
 assert PACKET_SIZE == 441, PACKET_SIZE
 
+LEGACY_FORMAT = "!idi10di4i40d"
+LEGACY_PACKET_SIZE = struct.calcsize(LEGACY_FORMAT)
+assert LEGACY_PACKET_SIZE == 436, LEGACY_PACKET_SIZE
+
 # The producer's own spellings (system_track_packet.AUTH_* / ICAO_NONE). Mirrored, not
 # imported: that module lives in the producer tree and importing it would couple the display
 # to a path outside its own project.
@@ -92,15 +96,28 @@ def components(state) -> dict:
 
 def decode(data: bytes, received_wall: float = 0.0, sender: str = "") -> SystemTrackState:
     """Decode one datagram, or raise PacketError. Never guesses a layout."""
-    if len(data) != PACKET_SIZE:
-        raise PacketError("length", f"{len(data)} bytes, expected {PACKET_SIZE}")
-    v = struct.unpack(FORMAT, data)
-    track_id, t, latest = v[0], v[1], v[2]
-    fused = tuple(v[3:13])
-    num = v[13]
-    ids = v[14:18]
-    flat = v[18:58]
-    auth, icao = v[58], v[59]
+    if len(data) == PACKET_SIZE:
+        v = struct.unpack(FORMAT, data)
+        track_id, t, latest = v[0], v[1], v[2]
+        fused = tuple(v[3:13])
+        num = v[13]
+        ids = v[14:18]
+        flat = v[18:58]
+        auth_raw, icao_raw = v[58], v[59]
+        auth = decode_auth(auth_raw)
+        icao = decode_icao(icao_raw)
+    elif len(data) == LEGACY_PACKET_SIZE:
+        v = struct.unpack(LEGACY_FORMAT, data)
+        track_id, t, latest = v[0], v[1], v[2]
+        fused = tuple(v[3:13])
+        num = v[13]
+        ids = v[14:18]
+        flat = v[18:58]
+        auth = "unknown"
+        icao = None
+    else:
+        raise PacketError("length", f"{len(data)} bytes, expected {PACKET_SIZE} (or legacy {LEGACY_PACKET_SIZE})")
+
     if not 0 <= num <= MAX_SENSORS:
         raise PacketError("sensor_count", f"numSensors = {num}, expected 0..{MAX_SENSORS}")
     if not math.isfinite(t):
@@ -113,7 +130,7 @@ def decode(data: bytes, received_wall: float = 0.0, sender: str = "") -> SystemT
             raise PacketError("numeric", f"sensor {sid} state contains non-finite values "
                                          f"(systemTrackId {track_id})")
     return SystemTrackState(track_id, t, latest, fused, num, tuple(ids[:num]), states,
-                            decode_auth(auth), decode_icao(icao), received_wall, sender)
+                            auth, icao, received_wall, sender)
 
 
 def encode_for_test(track_id: int, t: float, latest: int, fused, sensor_ids, sensor_states,
@@ -124,3 +141,12 @@ def encode_for_test(track_id: int, t: float, latest: int, fused, sensor_ids, sen
     flat += [0.0] * (MAX_SENSORS * STATE_LEN - len(flat))
     return struct.pack(FORMAT, track_id, t, latest, *fused, len(sensor_ids), *ids, *flat,
                        int(auth), int(icao))
+
+
+def encode_legacy_for_test(track_id: int, t: float, latest: int, fused, sensor_ids, sensor_states) -> bytes:
+    """Pack with the legacy 436-byte format (used by unit tests to verify backward compatibility)."""
+    ids = list(sensor_ids) + [0] * (MAX_SENSORS - len(sensor_ids))
+    flat = [float(x) for st in sensor_states for x in st]
+    flat += [0.0] * (MAX_SENSORS * STATE_LEN - len(flat))
+    return struct.pack(LEGACY_FORMAT, track_id, t, latest, *fused, len(sensor_ids), *ids, *flat)
+

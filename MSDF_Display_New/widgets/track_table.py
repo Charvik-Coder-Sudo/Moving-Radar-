@@ -106,9 +106,10 @@ class TrackTableModel(QtCore.QAbstractTableModel):
         super().__init__()
         self.rows: list = []
         self.palette = palette
-        # indicators come from the central style, built once
-        self.class_icons = {k: QtGui.QIcon(symbols.swatch_pixmap(cs.color, 12))
-                            for k, cs in style.CLASSIFICATIONS.items()}
+        # Track type icons only. There is deliberately NO classification swatch and no
+        # classification colour anywhere in this table: it is the readable record of what each
+        # packet said, and a cell tinted green or red turns a value into a judgement. The
+        # colour-coded picture is the job of the 2D / 3D / PPI views.
         self.source_icons = {k: QtGui.QIcon(symbols.icon_pixmap(src, style.TYPE_ICON_COLOR, 14))
                              for k, src in style.SOURCES.items()}
 
@@ -147,13 +148,9 @@ class TrackTableModel(QtCore.QAbstractTableModel):
             return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter) if fmt else \
                 int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         if role == QtCore.Qt.DecorationRole:
-            if index.column() == COL_CLASS:
-                return self.class_icons[style.classify(tv.state.classification).key]
             if index.column() == COL_SOURCE:
                 return self.source_icons[self.palette.source_key(tv.kind, tv.state.source)]
             return None
-        if role == QtCore.Qt.ForegroundRole and index.column() == COL_CLASS:
-            return QtGui.QBrush(QtGui.QColor(style.class_color(tv.state.classification)))
         if role == QtCore.Qt.ToolTipRole:
             cs = style.classify(tv.state.classification)
             return (f"{tv.state.source}/{tv.state.track_id} · "

@@ -1,4 +1,4 @@
-"""Live clock (follows packet time), truth targets from the export model, aircraft ambience."""
+"""Live clock (follows packet time) and truth targets from the export model."""
 
 import json
 import os
@@ -113,50 +113,6 @@ class TestTargets(unittest.TestCase):
         np.testing.assert_array_equal(tv.world_trail[-1], tv.world)      # history ends at "now"
         self.assertTrue(np.all(np.diff(tv.meta["trail_t"]) > 0))
         self.assertLessEqual(tv.meta["trail_t"][-1], 12.345)             # never the future
-
-
-class TestAmbience(unittest.TestCase):
-    def make(self, cfg):
-        from widgets.aircraft_audio import AircraftAmbience
-        view = QtWidgets.QWidget()
-        view.resize(400, 300)
-        return view, AircraftAmbience(view, cfg, APP)
-
-    def test_missing_file_is_harmless(self):
-        view, amb = self.make({"file": "assets/does_not_exist.wav"})
-        self.assertFalse(amb.available)
-        self.assertIn("not found", amb.error)
-        view.show()
-        amb.update()                                                  # no exception, nothing plays
-        self.assertFalse(amb.playing)
-        amb.shutdown()
-
-    def test_single_instance_follows_visibility(self):
-        from PySide6.QtMultimedia import QSoundEffect
-        view, amb = self.make(CONFIG.get("audio", {}))
-        self.assertIsNone(amb.error)
-        pump(3.0)                                                     # asynchronous load
-        if not amb.available:
-            self.skipTest("no audio output device / backend available here")
-        amb.update()
-        self.assertFalse(amb.playing)                                 # view not on screen
-        for _ in range(5):                                            # repeated open / close
-            view.show()
-            pump(0.3)                                                 # shown -> exposed by the platform
-            amb.update()
-            self.assertTrue(amb.playing)
-            view.hide()
-            pump(0.1)
-            amb.update()
-            self.assertFalse(amb.playing)
-        self.assertEqual(len(amb.findChildren(QSoundEffect)), 1)      # never more than one instance
-        view.show()
-        pump(0.3)
-        amb.update()
-        self.assertTrue(amb.playing)
-        amb.set_enabled(False)
-        self.assertFalse(amb.playing)
-        amb.shutdown()
 
 
 if __name__ == "__main__":

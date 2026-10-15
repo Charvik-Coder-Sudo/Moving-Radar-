@@ -85,12 +85,6 @@
     "show_acceleration_vectors": false,
     "show_target_labels": true
   },
-  "audio": {
-    "comment": "Aircraft background ambience while the 3D view is on screen. Represents no data.",
-    "enabled": true,
-    "volume": 0.25,
-    "file": "assets/aircraft_background.wav"
-  },
   "logging": {
     "comment": "Rotating file log in logs/. level: DEBUG, INFO, WARNING or ERROR.",
     "level": "INFO",

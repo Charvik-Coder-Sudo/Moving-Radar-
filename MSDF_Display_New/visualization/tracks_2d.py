@@ -20,6 +20,12 @@ from PySide6 import QtCore, QtGui
 from models.track_state import KIND_FUSED, KIND_SENSOR, KIND_TARGET
 from visualization import style, symbols
 
+#: Beyond this many objects on screen, only the SELECTED one is named. A label per track is
+#: readable with a handful of tracks and is a wall of text with thirty - and the thing an
+#: operator is actually looking at gets lost in it. The same rule, and the same number, as the
+#: 3D view (visualization.world_style.MAX_ALWAYS_LABELLED).
+MAX_ALWAYS_LABELLED = 6
+
 # stagger labels by source type so co-located truth / sensor / fused labels don't overlap
 LABEL_ANCHORS = {style.FUSED: (-0.3, 2.0), style.TARGET: (-0.3, 1.1), style.PRIMARY: (-0.3, 0.2),
                  style.SECONDARY: (-0.3, -0.7)}
@@ -133,7 +139,7 @@ class TrackItems2D:
             pens, brushes, syms = [], [], []
             for tv in tvs:
                 alpha = DIM_ALPHA if dim is not None and dim(tv) else 255
-                colour = style.class_color(tv.state.classification)
+                colour = style.track_color(tv.kind, tv.state.classification)
                 pen, brush = self.pens.marker(src, colour, alpha)
                 pens.append(pen)
                 brushes.append(brush)
@@ -163,7 +169,7 @@ class TrackItems2D:
                 pts = trail_xy(tv)
                 if pts is None or len(pts) < 1:
                     continue
-                colour = style.class_color(tv.state.classification)
+                colour = style.track_color(tv.kind, tv.state.classification)
                 if tv.kind == KIND_SENSOR:
                     dots_xy.append(pts)
                     dots_brush += [self.pens.brush(colour, 170)] * len(pts)
@@ -195,10 +201,13 @@ class TrackItems2D:
                       layers.get("show_acceleration_vectors", True) and vec_xy is not None,
                       lambda tv: vec_xy(tv, tv.state.acceleration * settings["acceleration_vector_scale_s2"]))
 
-        # labels: classification colour, staggered by source type
+        # labels: classification colour, staggered by source type. Which tracks get one is
+        # decided here rather than by the caller, so 2D and the PPI behave the same way.
         seen = set()
         if layers.get("show_target_labels", True):
-            for tv in tracks:
+            named = (tracks if len(tracks) <= MAX_ALWAYS_LABELLED
+                     else [tv for tv in tracks if tv.key == selected])
+            for tv in named:
                 seen.add(tv.key)
                 lab = self.labels.get(tv.key)
                 if lab is None:
@@ -210,7 +219,7 @@ class TrackItems2D:
                     self.labels[tv.key] = lab
                     lab._shown = (None, None)
                 text = label_fn(tv) if label_fn else tv.state.track_id
-                colour = style.class_color(tv.state.classification)
+                colour = style.track_color(tv.kind, tv.state.classification)
                 if lab._shown != (text, colour):          # re-layout text only when it changes
                     lab.setColor(colour)
                     lab.setText(text)

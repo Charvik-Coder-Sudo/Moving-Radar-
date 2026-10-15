@@ -192,13 +192,18 @@ def _xyz(v, unit=" m", spec=",.0f"):
 def describe_target(tv) -> str:
     """Truth target from the Scenario Export (fields as exported + labelled derived values)."""
     st = tv.state
-    cls = style.classify(st.classification)
+    # Truth carries NO classification. Classification is what the tracking system decided
+    # about a track; this is the simulation stating what an aircraft is. Showing the scenario's
+    # own Auth column here as though it were a classification would put a determination on the
+    # screen that nothing made - and would be the one place a value outside the display's two
+    # classifications could appear. It is reported as what it is: a scenario field.
     auth = html.escape(st.classification) if st.classification else "not exported"
     rows = [("Target ID", html.escape(st.target_id)),
             ("ICAO", GREY.format("&mdash; not interrogated (ground truth)")),
-            ("Classification", f"<b style='color:{cls.color}'>&#9632; {cls.label}</b> "
-                               + GREY.format(f"(scenario Auth: {auth})")),
-            ("Authentication", GREY.format("&mdash; truth is not an IFF result"))]
+            ("Classification", GREY.format("&mdash; truth is not classified by the system")),
+            ("Authentication", GREY.format("&mdash; truth is not an IFF result")),
+            ("Scenario Auth", GREY.format(f"{auth} (Scenario Export field, not a "
+                                          "classification)"))]
     iff_on, iff_key = tv.meta.get("IFF enabled", ""), tv.meta.get("IFF key", "")
     if iff_on:
         rows.append(("IFF", html.escape(iff_on) + (f" &middot; key {html.escape(iff_key)}" if iff_key else "")))

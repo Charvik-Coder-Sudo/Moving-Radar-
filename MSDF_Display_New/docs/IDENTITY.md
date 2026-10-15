@@ -60,12 +60,19 @@ So for a live track:
 | `friend` | Friendly | Authenticated (IFF) |
 | `unknown` | Unknown | No IFF reply |
 
-`Hostile` and `Neutral` remain in `visualization/style.py` because Scenario Export **truth**
-uses them, and they are reachable only from truth. `style.classification_from_auth` is the
-single place the mapping happens.
+The display supports **exactly these two classifications and no others**. `Hostile` and
+`Neutral` were removed from `visualization/style.py`: nothing upstream can produce them, and
+offering options the system cannot reach invites an operator to read meaning into them.
+`style.classification_from_auth` is the single place the mapping happens.
+
+A value the display does not support - a scenario file's `Foe`, say - resolves to **Unknown**,
+never to Friendly. Unknown means "not established as friendly", which is the honest reading of
+a value that cannot be interpreted; the other way round would assert something nothing
+determined. The raw source value is never rewritten: it stays on the model and is shown
+verbatim, labelled as a Scenario Export field.
 
 **`unknown` is the absence of a reply, not evidence of hostility.** It maps to Unknown and
-never to Hostile.
+it maps to Unknown.
 
 ## Why authentication is shown separately from classification
 

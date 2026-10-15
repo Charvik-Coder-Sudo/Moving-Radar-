@@ -53,7 +53,7 @@ Developer workflow: `python -m venv .venv`, activate it, `pip install -r require
 Only one program can receive on UDP 9000: run either this display or the Global Display on
 that port (the fusion engine sends to one destination).
 
-Other options: `--rdp-port N`, `--no-rdp`, `--no-sound`, `--view 3d|2d`, `--time s` (start in
+Other options: `--rdp-port N`, `--no-rdp`, `--view 3d|2d`, `--time s` (start in
 replay at that time), `--validate-only` (check the export, no GUI), `--screenshot out.png`,
 `--log-level DEBUG`.
 
@@ -178,23 +178,6 @@ packet timing), UDP endpoint, "Go Live" (after a replay or seek); status line wi
 last-packet age. The playback bar replays the export timeline; play or seek switches to
 replay, Go Live returns to following the packets.
 
-## Aircraft background audio
-
-| | |
-|---|---|
-| Purpose | background ambience for the 3D view only; it represents no data (not the radar, telemetry, detections, IFF, packets or engine state) |
-| Activation | the 3D view is on screen: 3D selected in the main window (normal or maximised) and the window not minimised |
-| Deactivation | 2D view selected, window minimised, application closed, or muted |
-| Audio source | `assets/aircraft_background.wav` - 8 s, 16-bit PCM mono 44.1 kHz, synthesised offline (shaped noise: low rumble, roar, faint turbine whine) and exactly periodic, so it loops without a gap |
-| Default | ON, volume 25 % (`config/display_config.json` → `audio`) |
-| Controls | speaker button "🔊" in the 3D toolbar; Settings → "Aircraft background sound" and Volume 0-100 %; `--no-sound` |
-| Dependency | QtMultimedia `QSoundEffect` from the already-installed PySide6 (no new package) |
-| Failure | missing / undecodable file or no QtMultimedia: a warning ("Aircraft background sound unavailable. 3D visualization will continue without audio.") in the log and status bar; the 3D view works normally |
-
-One `QSoundEffect` exists for the whole application, so repeated switching never starts a
-second sound. Loading is asynchronous and play / stop return at once; nothing blocks the GUI
-or the UDP receiver thread.
-
 ## Scenario Export change (`Moving_Radar.ipynb`)
 
 One change in cell 24 ("Target Profiling"): the target trajectory export, previously written
@@ -229,7 +212,7 @@ when CSVs must be parsed, not on a warm start. No file is read during playback (
 Unit tests cover packet decoding against the producer's own definition, the track store and
 stale model, the UDP receiver, the Scenario Export loader (including missing files and real
 rows), track placement (a round trip through the project's conventions), the live clock, truth
-targets, the audio manager, the attitude chain (`test_attitude.py`: eight known attitudes checked
+targets, the attitude chain (`test_attitude.py`: eight known attitudes checked
 on the body axes, the documented rotation order, and the matrix VTK actually applies), the
 sensor-vs-fused visual separation and label placement (`test_track_visuals.py`), and cross-checks
 against the exported scan schedule / attitude / LOS. `tests/gui_smoke.py` drives the real window
@@ -246,15 +229,14 @@ logging_setup.py              rotating log in logs/
 verify_installation.py        installation check (PASS / WARN / FAIL)
 setup_*.bat|sh, run_*.bat|sh  per-platform setup and launch
 requirements.txt, pyproject.toml   declared dependencies
-config/display_config.json    export paths, UDP, live clock, layers, audio, logging
+config/display_config.json    export paths, UDP, live clock, layers, logging
 data_loader/scenario_export.py  Scenario Export reader (validation, decimation, npz cache, targets)
 processing/scenario_processor.py  frame at a time: ownship, radars, beam, truth targets
 processing/track_projection.py    RDP states -> aircraft frame / world ENU
 processing/frame.py           frame / track view types
 rdp/                          packet decoder, UDP receiver thread, track store
 visualization/                3D view, 2D view, Aircraft PPI, hover, symbols, style, controller
-widgets/                      main window, pop-out, audio, navigation, status line, table, panels
-assets/aircraft_background.wav  3D ambience
+widgets/                      main window, pop-out, navigation, status line, table, panels
 docs/                         architecture, coordinates and attitude, RDP integration, C++ design
 ```
 

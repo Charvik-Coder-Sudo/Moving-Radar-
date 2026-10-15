@@ -91,9 +91,12 @@ class TestAttitudeMatchesExisting(unittest.TestCase):
             yaw = float(kinematics.yaw_from_velocity_deg(r["Vy"], r["Vx"]))   # Vy East, Vx North
             # pitch is invariant under the swap: it uses Vz against the horizontal magnitude
             pitch_fp = float(kinematics.pitch_from_velocity_deg(r["Vx"], r["Vy"], r["Vz"]))
-            self.assertAlmostEqual(yaw, r["Yaw"], places=6)
-            # existing pipeline pitch = flight path + 10 deg angle of attack
-            self.assertAlmostEqual(pitch_fp + 10.0, r["Pitch"], places=6)
+            self.assertAlmostEqual(yaw % 360.0, r["Yaw"] % 360.0, places=6)
+            # The exported Pitch IS the flight-path pitch. An earlier export added a constant
+            # 10 deg angle of attack on top, which made the aircraft sit visibly nose-high at
+            # cruise; that is gone as of the export regenerated 2026-10-14. Asserted exactly,
+            # so if an AoA term returns it fails here rather than quietly tilting every view.
+            self.assertAlmostEqual(pitch_fp, r["Pitch"], places=6)
             R_WB = attitude.body_to_world(r["Yaw"], r["Pitch"], r["Roll"])
             P = np.array([r["X"], r["Y"], r["Z"]]) + R_WB @ np.array(cfg.mount_xyz_frd)
             np.testing.assert_allclose(P, [r["Radar_X"], r["Radar_Y"], r["Radar_Z"]], atol=1e-6)

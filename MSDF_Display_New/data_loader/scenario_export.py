@@ -103,7 +103,9 @@ class TargetTimeline:
     t_ms: np.ndarray          # (N,) export timestamps, ms (display-rate decimated rows)
     pos: np.ndarray           # (N,3) ENU m
     vel: np.ndarray           # (N,3) ENU m/s
-    auth: str                 # scenario classification (Friend / Foe / Neutral / Unknown), "" if absent
+    auth: str                 # the export's own Auth column, verbatim ("" if absent). Source
+                              # data, NOT a display classification: the display has only
+                              # Friendly and Unknown, and truth is not classified at all.
     iff_enabled: str          # as exported ("True" / "False"), "" if absent
     iff_key: str              # as exported, "" if absent / empty
     source: str
@@ -375,6 +377,63 @@ class ScenarioExport:
         issues.append(ExportIssue("info", str(path), f"{n_rows:,} rows read, {len(data['Time']):,} kept"
                                   + (f" ({self.rate_hz:g} Hz display decimation)" if decimate else "")))
         return data, issues
+
+
+def validate(root, config: dict) -> tuple[bool, list[str]]:
+    """Is ``root`` a usable Scenario Export? Returns (ok, reasons).
+
+    Checks the folder a user has just chosen WITHOUT disturbing anything already loaded: it
+    builds a throwaway ScenarioExport over that root and runs the same checks the loader does,
+    so a folder that passes here is one the loader will accept.
+
+    What is checked, in the order a user would want to hear about it:
+
+      1. the folder exists
+      2. every file the configuration requires is present
+      3. the sensor properties parse and describe the configured sensors
+      4. each required CSV has its required columns, parses as numbers, and has usable rows
+
+    The reasons are returned as text meant to be READ - "required column 'X' is missing from
+    <file>", not "invalid scenario". A caller that only wants a yes/no can ignore them.
+
+    Nothing is cached and nothing is mutated; the check is as cheap as reading each CSV's
+    header plus one pass for the row counts.
+    """
+    root = Path(root)
+    cfg = dict(config or {})
+    cfg.setdefault("scenario_export", {})
+    cfg["scenario_export"] = {**cfg["scenario_export"], "root": str(root)}
+    if not root.is_dir():
+        return False, [f"Not a folder: {root}"]
+    try:
+        export = ScenarioExport(cfg, root)
+    except Exception as exc:                       # a malformed configuration, not the folder
+        return False, [f"Cannot read the display configuration: {exc}"]
+
+    reasons = [i.message if i.file == str(root) else f"{i.message}: {i.file}"
+               for i in export.missing()]
+    if reasons:
+        return False, reasons
+
+    _sensors, issues = export.sensor_dicts()
+    reasons += [f"{i.message} ({i.file})" for i in issues if i.severity == "error"]
+    if reasons:
+        return False, reasons
+
+    # the required CSVs: columns, numeric content and at least one usable row. _read_csv
+    # raises ScenarioExportError naming the file and the problem, which is what to show.
+    checks = [(export.path(export.cfg["ownship_file"]), OWNSHIP_COLUMNS)]
+    for _num, m in sorted(export.sensor_map.items()):
+        checks.append((export.path(m["pose_file"]), OWNSHIP_COLUMNS))
+        checks.append((export.path(m["schedule_file"]), SCHEDULE_COLUMNS))
+    for path, columns in checks:
+        try:
+            export._read_csv(path, columns, decimate=True)      # noqa: SLF001 - same checks
+        except ScenarioExportError as exc:
+            reasons.append(str(exc).replace("ERROR   ", ""))
+        except Exception as exc:
+            reasons.append(f"{path}: cannot be read ({type(exc).__name__}: {exc})")
+    return (not reasons), reasons
 
 
 def describe_files(root: Path) -> list[tuple[str, int, float]]:

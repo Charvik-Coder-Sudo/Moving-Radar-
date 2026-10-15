@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 from PySide6 import QtCore
 
-from data_loader.scenario_export import ScenarioExport, ScenarioExportError
+from data_loader.scenario_export import ScenarioExport, ScenarioExportError, validate
 from models.sensor_state import SensorConfig
 from processing.scenario_processor import ScenarioProcessor
 from processing.track_projection import TrackProjector
@@ -73,6 +73,7 @@ class ViewController(QtCore.QObject):
     view_mode_changed = QtCore.Signal(str)
     status_message = QtCore.Signal(str)
     live_changed = QtCore.Signal(str, str)      # live state, detail
+    scenario_state = QtCore.Signal(str, str)    # NOT LOADED / VALIDATING / LOADED / FAILED, detail
 
     def __init__(self, config: dict, app_dir: Path, rdp_enabled: bool = True):
         super().__init__()
@@ -146,6 +147,26 @@ class ViewController(QtCore.QObject):
         if self._loader is not None:
             self._loader.wait(5000)
 
+    def load_scenario_from(self, folder) -> tuple[bool, list[str]]:
+        """Validate a chosen Scenario Export folder and load it ONLY if it passes.
+
+        A folder that fails validation changes nothing: whatever is loaded now stays loaded,
+        the configured root is untouched, and the reasons are returned so the caller can say
+        what needs correcting. This is what keeps a wrong pick from destroying a good
+        scenario (and from leaving the display in a half-loaded state).
+        """
+        folder = Path(folder)
+        self.scenario_state.emit("VALIDATING", str(folder))
+        ok, reasons = validate(folder, self.config)
+        if not ok:
+            self.scenario_state.emit("FAILED", str(folder))
+            self.status_message.emit(f"Scenario Export validation failed: {folder}")
+            return False, reasons
+        self.config.setdefault("scenario_export", {})["root"] = str(folder)
+        self.export = ScenarioExport(self.config, self.app_dir)
+        self.load_scenario()
+        return True, []
+
     def load_scenario(self):
         if self._loader is not None and self._loader.isRunning():
             return
@@ -155,6 +176,7 @@ class ViewController(QtCore.QObject):
         self._loader.progress.connect(self._on_progress)
         self._loader.done.connect(self._on_loaded)
         self._loader.failed.connect(self._on_failed)
+        self.scenario_state.emit("VALIDATING", str(self.export.root))
         self._on_progress(f"Loading Scenario Export from {self.export.root} ...")
         self._loader.start()
 
@@ -175,6 +197,7 @@ class ViewController(QtCore.QObject):
             self.playing_changed.emit(True)
         self.loading_message = ""
         self._emit_frame()
+        self.scenario_state.emit("LOADED", str(self.export.root))
         self.data_loaded.emit(data)
         n_warn = sum(1 for i in data.issues if i.severity == "warning")
         self.status_message.emit(
@@ -188,6 +211,7 @@ class ViewController(QtCore.QObject):
         self.current_frame = None
         self.load_error = message
         self.loading_message = ""
+        self.scenario_state.emit("FAILED", str(self.export.root))
         self.data_error.emit(message)
         self.status_message.emit("Scenario Export unavailable - see the error banner")
 

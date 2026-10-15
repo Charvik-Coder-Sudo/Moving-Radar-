@@ -6,8 +6,8 @@ Needs the Scenario Export. Binds the RDP receiver to a free UDP port and sends a
 SystemTrack packets built with rdp.packet.encode_for_test - TEST VECTORS only, used to
 exercise the display path (they are not scenario data). Checks: WAITING -> LIVE, tracks
 placed in the world and aircraft frames, 3D / 2D switching, world-view maximise and
-restore, PPI pop-out and restore, a single aircraft-ambience instance that follows the
-3D view. Saves a screenshot per stage and exits non-zero on any failure.
+restore, PPI pop-out and restore. Saves a screenshot per stage and exits non-zero on
+any failure.
 """
 
 import json
@@ -51,8 +51,6 @@ if export is None:
     sys.exit(2)
 cfg["scenario_export"]["root"] = str(export)
 cfg["rdp"]["port"] = PORT
-if "--no-sound" in sys.argv:
-    cfg.setdefault("audio", {})["enabled"] = False
 ctrl = ViewController(cfg, APP)
 win = MainWindow(ctrl)
 win.show()
@@ -218,13 +216,8 @@ ctrl.set_view_mode("2d")
 pump(1.0)
 check("2D view shown", win.stack.currentWidget() is win.view2d)
 shot("3_live_2d")
-sound_on = win.ambience.available and win.ambience.enabled
-if sound_on:
-    check("ambience off in 2D", not win.ambience.playing)
 ctrl.set_view_mode("3d")
 pump(1.0)
-if sound_on:
-    check("ambience on in 3D", win.ambience.playing)
 win.popouts.pop_out("world")
 pump(1.0)
 check("world view maximised", not win.table.isVisible() and win.view3d.isVisible())
@@ -238,8 +231,6 @@ check("PPI popped out", win.popouts.is_out("ppi") and win.ppi.window() is not wi
 win.popouts.out["ppi"][0].close()
 pump(1.0)
 check("PPI restored", win.ppi.window() is win)
-from PySide6.QtMultimedia import QSoundEffect  # noqa: E402
-check("single ambience instance", len(win.ambience.findChildren(QSoundEffect)) <= 1)
 shot("5_final")
 win.close()
 print("OK" if not failures else f"{len(failures)} FAILURE(S): {failures}")

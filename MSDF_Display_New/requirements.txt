@@ -8,7 +8,7 @@
 # pins are what break an install on a different OS or Python version. The combination verified
 # on 2026-09-25 (Windows 11, Python 3.14.6) is noted beside each line.
 
-PySide6>=6.5            # Qt 6 GUI, QtMultimedia for the 3D ambience   (verified 6.11.2)
+PySide6>=6.5            # Qt 6 GUI, Qt Quick 3D for the world view      (verified 6.11.2)
 numpy>=1.24             # all geometry, arrays and the npz cache        (verified 2.5.3)
 pandas>=2.0             # Scenario Export CSV parsing (first run only)  (verified 3.0.5)
 pyqtgraph>=0.13         # 2D world view and the Aircraft PPI            (verified 0.14.0)

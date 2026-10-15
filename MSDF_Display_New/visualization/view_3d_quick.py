@@ -50,6 +50,10 @@ from visualization.world_style import (AIRCRAFT_LENGTH_M, BEAM_OPACITY, COVERAGE
 log = logging.getLogger(__name__)
 
 SCENE_QML = "quick3d/scene.qml"
+#: How far across the finest terrain tile the aircraft may drift before the tiles are rebuilt
+#: around it. Expressed as a fraction of that tile's half-extent, so there is still detailed
+#: ground ahead when the rebuild happens.
+TERRAIN_KEEP_INSIDE = 0.6
 # Atmospheric depth. The terrain already carries baked haze in its vertex colours out to
 # HAZE_FULL_M; the renderer's fog continues the same fade for everything else in the scene,
 # so an aircraft at the horizon sits in the same air as the ground under it.
@@ -356,10 +360,14 @@ class QuickWorldView(QtWidgets.QWidget):
             track = (pos[0], pos[-1])           # the airfield is placed on the ground track
         self.scenery = scenery.Scenery(lo=np.asarray(lo, float), hi=np.asarray(hi, float),
                                        track=track)
-        frame = self.ctrl.current_frame
-        centre = (frame.ownship.position[:2] if frame is not None and frame.ownship is not None
-                  else 0.5 * (np.asarray(lo, float) + np.asarray(hi, float))[:2])
-        self._terrain_center = np.asarray(centre, float)
+        # Centred on the middle of the OWNSHIP'S OWN TRACK, not on where it happens to be at
+        # this instant and not on the scene bounds. The scene bounds are pulled about by
+        # distant targets, leaving the aircraft off-centre and close to the edge of the
+        # detailed tile; its own track is short by comparison, so centring there keeps the
+        # aircraft near the middle for the whole run. The terrain is then built once and never
+        # has to move, which is what keeps a 1.2 s rebuild out of the render loop.
+        own_track = np.asarray(track, float).reshape(-1, np.asarray(track).shape[-1])[:, :2]
+        self._terrain_center = 0.5 * (own_track.min(axis=0) + own_track.max(axis=0))
         self.scene_centre = 0.5 * (np.asarray(lo, float) + np.asarray(hi, float))
         self.terrain_meshes = self.scenery.terrain_lods(self._terrain_center)
         self.terrain_counts = []
@@ -461,17 +469,23 @@ class QuickWorldView(QtWidgets.QWidget):
         return float(drawn) if drawn else float(cfg.r_max)
 
     def _move_terrain(self, xy):
-        """Re-centre the detailed tiles on the aircraft, in steps.
+        """Re-centre the tiles only if the aircraft is leaving the ground they cover.
 
-        Rebuilding a tile is not free, so it happens only once the aircraft has travelled a
-        whole step - roughly every two minutes at 150 m/s - and the coarse tiles, which cover
-        hundreds of kilometres, move even less often.
+        Rebuilding the three tiles costs about 1.2 s, and it runs on the GUI thread, so doing
+        it on a fixed travel interval put a visible stall into normal playback for no benefit:
+        the finest tile already reaches TERRAIN_LODS[0][0] in every direction, far enough to
+        cover this scenario end to end from a single build.
+
+        So the test is COVERAGE, not distance travelled. A rebuild happens only when the
+        aircraft gets near the edge of the detailed tile, which in a scenario that stays
+        inside it never happens at all - and a scenario that does wander out still gets
+        ground under it.
         """
         xy = np.asarray(xy, float)
         if self._terrain_center is None:
             return
         moved = float(np.linalg.norm(xy - self._terrain_center))
-        if moved < scenery.TERRAIN_REBUILD_M:
+        if moved < TERRAIN_KEEP_INSIDE * scenery.TERRAIN_LODS[0][0]:
             return
         rebuilt = set()
         for i, (half, n) in enumerate(scenery.TERRAIN_LODS):
@@ -630,7 +644,7 @@ class QuickWorldView(QtWidgets.QWidget):
         # ---- truth target history ----
         show_hist = layers.get("show_targets", True) and layers.get("show_target_history", True)
         paths = [tv.world_trail for tv in frame.targets] if show_hist else []
-        cols = [style.hex_to_rgb(style.class_color(tv.state.classification))
+        cols = [style.hex_to_rgb(style.track_color(tv.kind, tv.state.classification))
                 for tv in frame.targets] if show_hist else []
         self._trail_layer("targetTrails", paths, cols, SENSOR_TRAIL_WIDTH)
 
@@ -639,7 +653,7 @@ class QuickWorldView(QtWidgets.QWidget):
         for name, group, width in (("sensorTrails", sensor, SENSOR_TRAIL_WIDTH),
                                    ("fusedTrails", fused, FUSED_TRAIL_WIDTH)):
             paths = [tv.world_trail for tv in group] if show_trails else []
-            cols = [style.hex_to_rgb(style.class_color(tv.state.classification))
+            cols = [style.hex_to_rgb(style.track_color(tv.kind, tv.state.classification))
                     for tv in group] if show_trails else []
             self._trail_layer(name, paths, cols, width)
 
@@ -653,7 +667,7 @@ class QuickWorldView(QtWidgets.QWidget):
             world = np.array([tv.world for tv in group], float)
             sizes = np.array([self._glyph_size(tv, angular) for tv in group])
             segs = ribbon.glyph_segments(world, shape, sizes, right, up)
-            per_track = np.array([style.hex_to_rgb(style.class_color(tv.state.classification))
+            per_track = np.array([style.hex_to_rgb(style.track_color(tv.kind, tv.state.classification))
                                   for tv in group], float)
             sides = len(segs) // max(len(group), 1)
             self._ribbon(name, segs, np.repeat(per_track, sides, axis=0), width)
@@ -669,7 +683,7 @@ class QuickWorldView(QtWidgets.QWidget):
             for tv in tracks:
                 starts.append(tv.world)
                 ends.append(np.asarray(tv.world, float) + course_vector(tv) * seconds)
-                cols.append(style.hex_to_rgb(style.class_color(tv.state.classification)))
+                cols.append(style.hex_to_rgb(style.track_color(tv.kind, tv.state.classification)))
             segs = (np.stack([np.array(starts), np.array(ends)], axis=1) if starts
                     else np.empty((0, 2, 3)))
             self._ribbon("vectors", segs, np.array(cols, float) if cols else (0, 0, 0), 1.6)
@@ -723,12 +737,12 @@ class QuickWorldView(QtWidgets.QWidget):
         for tv in tracks:
             if tv.kind == KIND_FUSED or tv.key == self.ctrl.selected_key:
                 items.append((tv.world, track_label(tv),
-                              style.class_color(tv.state.classification)))
+                              style.track_color(tv.kind, tv.state.classification)))
         named = len(frame.targets) <= MAX_ALWAYS_LABELLED
         for tv in frame.targets if layers.get("show_targets", True) else []:
             if named or tv.key == self.ctrl.selected_key:
                 items.append((tv.world, f"T{tv.state.target_id}",
-                              style.class_color(tv.state.classification)))
+                              style.track_color(tv.kind, tv.state.classification)))
         if not items:
             return self._show_labels([])
         sx, sy, front = self.project(np.array([p for p, _t, _c in items], float))

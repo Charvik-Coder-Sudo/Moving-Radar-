@@ -13,7 +13,6 @@ them automatically (LIVE). Play / seek replays the export; "Go Live" returns.
     python main.py --validate-only          check / load the Scenario Export, print the report
     python main.py --rdp-port 9001          override the UDP port
     python main.py --no-rdp                 world views only
-    python main.py --no-sound               no aircraft ambience in the 3D view
     python main.py --time 60 --view 2d --screenshot out.png
 
 Nothing depends on the working directory: every path is resolved from this file through
@@ -111,7 +110,6 @@ def main(argv=None) -> int:
     ap.add_argument("--rdp-port", type=int, default=None, help="UDP port of the RDP SystemTrack stream")
     ap.add_argument("--time", type=float, default=None, help="start at this export time (s)")
     ap.add_argument("--view", choices=["3d", "2d"], default="3d", help="world view shown at start")
-    ap.add_argument("--no-sound", action="store_true", help="no aircraft ambience in the 3D view")
     ap.add_argument("--rate", type=float, default=None, help="playback rate")
     ap.add_argument("--play", action="store_true", help="start playing as soon as the export is loaded")
     ap.add_argument("--screenshot", default=None, help="save a PNG of the window once loaded and exit")
@@ -131,8 +129,6 @@ def main(argv=None) -> int:
     config, (export_dir, tried) = apply_export(config, args.export)
     if args.rdp_port is not None:
         config.setdefault("rdp", {})["port"] = args.rdp_port
-    if args.no_sound:
-        config.setdefault("audio", {})["enabled"] = False
     logging_setup.log_startup(log, config_path, export_dir,
                               {"rdp": f"{config.get('rdp', {}).get('bind_host')}:"
                                       f"{config.get('rdp', {}).get('port')}"
@@ -190,7 +186,9 @@ def main(argv=None) -> int:
         ctrl.refresh()
         app.processEvents()
         out = Path(args.screenshot)
-        win.screen().grabWindow(win.winId()).save(str(out))
+        # win.grab() rather than screen().grabWindow(winId()): the latter returns an empty
+        # pixmap on this platform, which silently saved a blank PNG.
+        win.grab().save(str(out))
         if args.view == "3d" and ctrl.is_ready:
             win.view3d.grab_image().save(str(out.with_name(out.stem + "_3d.png")))
         print(f"saved {out}")

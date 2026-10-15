@@ -150,5 +150,57 @@ class TestAgeFade(unittest.TestCase):
         self.assertEqual(fade((255, 0, 0), 0).shape, (0, 3))
 
 
+
+class TestLabelStackingTerminates(unittest.TestCase):
+    """Label placement runs inside the render path, so it must finish - always.
+
+    It once stepped each label to `other_label_y - LABEL_LINE_PX`, which moves it by however
+    far that neighbour happens to be. For a cluster of tracks a fraction of a pixel apart that
+    is an unbounded number of passes, and the window stops responding mid-frame. Found by
+    faulthandler on a wedged display fed real MultiTrack traffic.
+    """
+
+    def _within(self, sx, sy, seconds=5.0):
+        import threading
+        from visualization.world_style import stacked_offsets
+        done = []
+        t = threading.Thread(target=lambda: done.append(stacked_offsets(sx, sy, [True] * len(sx))),
+                             daemon=True)
+        t.start()
+        t.join(seconds)
+        self.assertTrue(done, f"stacked_offsets did not return within {seconds}s "
+                              f"for {len(sx)} labels")
+        return done[0]
+
+    def test_a_pile_of_identical_positions_returns(self):
+        n = 60
+        self._within(np.full(n, 500.0), np.full(n, 400.0))
+
+    def test_labels_a_hair_under_one_line_apart_return(self):
+        from visualization.world_style import LABEL_LINE_PX
+        n = 40
+        self._within(np.full(n, 500.0), 400.0 + np.arange(n) * (LABEL_LINE_PX - 0.01))
+
+    def test_sub_pixel_jitter_returns(self):
+        rng = np.random.default_rng(1)
+        n = 50
+        self._within(np.full(n, 500.0), 400.0 + rng.normal(0.0, 0.3, n))
+
+    def test_the_drop_is_capped(self):
+        from visualization.world_style import LABEL_LINE_PX, MAX_LABEL_STACK, LABEL_OFFSET_PX
+        n = 80
+        off = self._within(np.full(n, 500.0), np.full(n, 400.0))
+        deepest = min(o[1] for o in off)
+        floor = LABEL_OFFSET_PX[1] - MAX_LABEL_STACK * LABEL_LINE_PX
+        self.assertGreaterEqual(deepest, floor,
+                                "a label was pushed past the cap, so the work is unbounded")
+
+    def test_it_still_separates_labels_that_fit(self):
+        from visualization.world_style import LABEL_LINE_PX
+        off = self._within(np.array([500.0, 500.0, 502.0]), np.array([400.0, 400.0, 399.0]))
+        ys = sorted(o[1] + y for o, y in zip(off, (400.0, 400.0, 399.0)))
+        self.assertTrue(all(b - a >= LABEL_LINE_PX - 1 for a, b in zip(ys, ys[1:])), ys)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,10 @@ RIBBON_LAYERS = (("rangeRings", RANGE_RING_OPACITY),
 LABEL_OFFSET_PX = (12, 10)             # from the symbol, display pixels
 LABEL_LINE_PX = 15.0                   # vertical step used when two labels collide
 LABEL_WIDTH_PX = 74.0                  # assumed label width when testing for a collision
+#: How far a label may be pushed down before it is simply left where it lands. Past this the
+#: cluster is unreadable whatever is done with it, and the only thing that matters is that the
+#: renderer returns.
+MAX_LABEL_STACK = 24
 
 TRACK_COURSE_ALPHA = 0.25              # smoothing of a live track's heading (1.0 = none)
 
@@ -108,12 +112,20 @@ def stacked_offsets(sx, sy, front):
     for i in np.argsort(-sy):                          # the topmost label keeps its natural place
         x, y = sx[i] + LABEL_OFFSET_PX[0], sy[i] + LABEL_OFFSET_PX[1]
         if front[i]:
-            moved = True
-            while moved:                               # y only ever decreases, so this terminates
-                moved = False
-                for px, py in placed:
-                    if abs(x - px) < LABEL_WIDTH_PX and abs(y - py) < LABEL_LINE_PX:
-                        y, moved = py - LABEL_LINE_PX, True
+            # Step down a WHOLE line at a time until the box is clear.
+            #
+            # The whole line, and the hard cap, are both load-bearing. Stepping to
+            # `other - LABEL_LINE_PX` instead moves y by however far that one label happens to
+            # be, which can be a fraction of a pixel; a cluster of tracks a hair apart then
+            # takes an unbounded number of passes to settle, inside the render path, and the
+            # window simply stops responding. A fixed step makes the work per label bounded by
+            # how far down it can be pushed, and the cap bounds it absolutely.
+            steps = 0
+            while steps < MAX_LABEL_STACK and any(
+                    abs(x - px) < LABEL_WIDTH_PX and abs(y - py) < LABEL_LINE_PX
+                    for px, py in placed):
+                y -= LABEL_LINE_PX
+                steps += 1
             placed.append((x, y))
         out[i] = (int(round(x - sx[i])), int(round(y - sy[i])))
     return out

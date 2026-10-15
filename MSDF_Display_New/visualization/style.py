@@ -2,7 +2,7 @@
 
 Two independent concepts, never mixed:
 
-    Classification  ->  colour        (Friendly green, Neutral white, Hostile red, Unknown yellow)
+    Classification  ->  colour        (Friendly green, Unknown yellow)
     Track type      ->  symbol shape  SENSOR TRACK = SQUARE, FUSED SYSTEM TRACK = TRIANGLE,
                                       truth target = aircraft silhouette, ownship = its own
                                       outlined triangle (PPI) / aircraft model (world views)
@@ -27,7 +27,11 @@ from models.track_state import KIND_FUSED, KIND_SENSOR, KIND_TARGET
 # classification
 # ----------------------------------------------------------------------------
 
-FRIENDLY, NEUTRAL, HOSTILE, UNKNOWN = "FRIENDLY", "NEUTRAL", "HOSTILE", "UNKNOWN"
+#: The display supports exactly TWO classifications. There is no hostile and no neutral:
+#: MultiTrack decides identity with a single field holding "friend" or "unknown"
+#: (plotCluster.processDetectionsFile), so no other value can reach a track, and presenting
+#: options the system cannot produce would invite an operator to read meaning into them.
+FRIENDLY, UNKNOWN = "FRIENDLY", "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -39,18 +43,16 @@ class ClassStyle:
 
 CLASSIFICATIONS: dict[str, ClassStyle] = {
     FRIENDLY: ClassStyle(FRIENDLY, "Friendly", "#22c55e"),     # green
-    NEUTRAL: ClassStyle(NEUTRAL, "Neutral", "#ffffff"),        # white
-    HOSTILE: ClassStyle(HOSTILE, "Hostile", "#ef4444"),        # red
     UNKNOWN: ClassStyle(UNKNOWN, "Unknown", "#facc15"),        # yellow
 }
 
-# file spellings -> canonical classification. Anything not listed is Unknown.
-_ALIASES = {
-    "FRIENDLY": FRIENDLY, "FRIEND": FRIENDLY,
-    "NEUTRAL": NEUTRAL,
-    "HOSTILE": HOSTILE, "FOE": HOSTILE,
-    "UNKNOWN": UNKNOWN, "PENDING": UNKNOWN, "": UNKNOWN,
-}
+#: Spellings that mean FRIENDLY. Everything else - including a value this display does not
+#: support, such as a scenario file's "Foe" - resolves to UNKNOWN.
+#:
+#: Unknown, never Friendly: Unknown means "not established as friendly", which is the honest
+#: reading of a value the display cannot interpret. Mapping an unsupported value the other way
+#: would assert something no part of the system ever determined.
+_FRIENDLY_SPELLINGS = {"FRIENDLY", "FRIEND"}
 
 
 def classification_from_auth(auth) -> str:
@@ -59,19 +61,19 @@ def classification_from_auth(auth) -> str:
     MultiTrack decides identity with ONE field holding "friend" or "unknown", and nothing
     else: ``plotCluster.processDetectionsFile`` maps the secondary sensor's ``Auth`` column to
     exactly those two words, and no part of the tracker ever produces a hostile or a neutral.
-    So HOSTILE and NEUTRAL are simply unreachable from a live track, and the display must not
-    invent a route to them. They remain reachable only from Scenario Export truth, which is
-    labelled as truth wherever it is shown.
+    Those two words are the whole vocabulary this display has, which is why there is no
+    hostile and no neutral anywhere in it.
 
     "unknown" means no IFF reply was received. That is the absence of evidence, not evidence
-    of hostility, which is why it maps to Unknown and never to Hostile.
+    of hostility; it maps to Unknown.
     """
     return FRIENDLY if str(auth).strip().lower() == "friend" else UNKNOWN
 
 
 def classify(raw) -> ClassStyle:
-    """Canonical classification style for a track-file value (case-insensitive)."""
-    return CLASSIFICATIONS[_ALIASES.get(str(raw).strip().upper(), UNKNOWN)]
+    """Canonical classification style for a value (case-insensitive). Friendly, or Unknown."""
+    return CLASSIFICATIONS[FRIENDLY if str(raw).strip().upper() in _FRIENDLY_SPELLINGS
+                           else UNKNOWN]
 
 
 def class_color(raw) -> str:
@@ -121,6 +123,27 @@ TYPE_ICON_COLOR = "#94a3b8"        # track-type icons shown without a classifica
 AIRCRAFT_BODY = "#8c99a3"          # light gunmetal: reads against terrain and sky
 AIRCRAFT_DARK = "#2a3136"          # canopy, nozzle, intakes
 AIRCRAFT_ICON_FILL = "#7d8a91"     # 2D / PPI silhouette fill (slightly lighter for a dark map)
+
+#: Truth targets are drawn in this, never in a classification colour. A truth target is the
+#: simulation saying WHERE AN AIRCRAFT ACTUALLY IS - it is not the tracking system saying what
+#: it has identified. Colouring it green or red would put an identification on the screen that
+#: no sensor made, and an operator comparing truth against tracks could not tell which of the
+#: two was claiming it. Slate, so it cannot be mistaken for Friendly or Unknown
+#: (visualization/style.py CLASSIFICATIONS).
+TRUTH_COLOR = "#9aa7b4"
+
+
+def track_color(kind: str, classification) -> str:
+    """The colour a track is drawn in. THE one place that decides it.
+
+    Classification colour belongs to tracks the system has identified. Truth comes from the
+    Scenario Export and carries the scenario's own Auth column, which is ground truth about
+    the aircraft rather than a determination anything made - so it is drawn neutral.
+
+    Every view calls this instead of ``class_color`` so the rule cannot hold in one view and
+    not another.
+    """
+    return TRUTH_COLOR if kind == KIND_TARGET else class_color(classification)
 
 
 class Palette:

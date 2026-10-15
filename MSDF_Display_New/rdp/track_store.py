@@ -19,6 +19,7 @@ states it carries in sensorIds / sensorStates. No other association is made.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ from models.track_state import KIND_FUSED, KIND_SENSOR, TrackState
 from processing.frame import RadarView, TrackView
 from rdp.packet import SystemTrackState, components
 from visualization import style
+
+log = logging.getLogger(__name__)
 
 ACTIVE, STALE, HIDDEN = "ACTIVE", "STALE", "HIDDEN"
 
@@ -58,11 +61,25 @@ class TrackStore:
         self.hide_timeout_s = float(cfg.get("hide_timeout_s", 10.0))
         self.stream_stale_timeout_s = float(cfg.get("stream_stale_timeout_s", 5.0))
         self.trail_points = int(cfg.get("trail_points", 200))
+        # How long a track that has stopped updating is REMEMBERED after it stops being drawn.
+        # Without this the record dictionary only ever grows: a hidden track keeps its trail
+        # buffers for ever, and MultiTrack mints a fresh system track id whenever a report
+        # fails to correlate, so over a long run the store accumulates thousands of dead
+        # tracks that nothing will ever show again.
+        self.forget_timeout_s = float(cfg.get("forget_timeout_s", 120.0))
+        self.max_records = int(cfg.get("max_records", 4096))
+        self.forgotten = 0
         self.sensor_names = dict(sensor_names)          # RDP sensorId -> display source id
         self.records: dict[int, TrackRecord] = {}
         self.packets_total = 0
         self.packets_invalid = 0
         self.invalid_by_reason: Counter = Counter()
+        # How many times a system track that HAD been authenticated came back unauthenticated.
+        # Not a display fault and not corrected here - the packet is shown as it arrives - but
+        # it is invisible otherwise, and it is the signature of an upstream identity reset
+        # (docs/IDENTITY.md, upstream note 4). Counted so the status bar can say so.
+        self.identity_downgrades = 0
+        self._downgraded: set[int] = set()
         self.stale_packets = 0
         self.restarts = 0
         self.unknown_sensor_ids: Counter = Counter()
@@ -90,6 +107,13 @@ class TrackStore:
             if sid not in self.sensor_names:
                 self.unknown_sensor_ids[sid] += 1
         rec = self.records.get(st.system_track_id)
+        if rec is not None and rec.state.auth == "friend" and st.auth != "friend":
+            self.identity_downgrades += 1
+            if st.system_track_id not in self._downgraded:
+                self._downgraded.add(st.system_track_id)
+                log.warning("system track %s lost its IFF identity: auth %r -> %r, icao %r -> %r. "
+                            "The packet is shown as received; see docs/IDENTITY.md.",
+                            st.system_track_id, rec.state.auth, st.auth, rec.state.icao, st.icao)
         if rec is not None and st.time < rec.state.time:
             if rec.status == ACTIVE:
                 self.stale_packets += 1
@@ -111,7 +135,12 @@ class TrackStore:
         for sid, s in zip(st.sensor_ids, st.sensor_states):
             self._push(rec.sensor_history.setdefault(sid, deque()), _xyz(s))
         self.last_packet_time = st.time
-        self.newest_time = st.time
+        # The HIGHEST packet time seen, not the most recent one received. MultiTrack sends one
+        # packet per incoming sensor report and interleaves system tracks, so arrivals are not
+        # ordered in time even when no packet is stale for its own track. Taking the last
+        # arrival would make this value walk backwards, which the world clock reads as the RDP
+        # having restarted - and it would then drag the displayed time back with it.
+        self.newest_time = st.time if self.newest_time is None else max(self.newest_time, st.time)
         return True
 
     def _push(self, dq: deque, xyz):
@@ -135,7 +164,31 @@ class TrackStore:
             if status != rec.status:
                 rec.status = status
                 changed = True
+        changed |= self._forget(now_wall)
         return changed
+
+    def _forget(self, now_wall: float) -> bool:
+        """Drop tracks that stopped updating long ago, so the store stays bounded.
+
+        Only HIDDEN tracks are considered, and only once they have been silent for
+        ``forget_timeout_s`` - well past the point where they are still drawn. If the same
+        system track id ever reappears it is simply treated as new, which is the right reading
+        after that long a silence.
+        """
+        dead = [tid for tid, rec in self.records.items()
+                if rec.status == HIDDEN and now_wall - rec.last_update_wall > self.forget_timeout_s]
+        if len(self.records) - len(dead) > self.max_records:
+            # a hard ceiling as well, in case tracks arrive faster than they age out
+            extra = sorted(((r.last_update_wall, t) for t, r in self.records.items()
+                            if t not in set(dead)))[:len(self.records) - len(dead) - self.max_records]
+            dead += [t for _wall, t in extra]
+        for tid in dead:
+            del self.records[tid]
+        self.forgotten += len(dead)
+        if dead:
+            log.debug("forgot %d track(s) silent for more than %.0fs; %d remain",
+                      len(dead), self.forget_timeout_s, len(self.records))
+        return bool(dead)
 
     # ------------------------------------------------------------------ output
     def sensor_source(self, sid: int) -> str:
@@ -172,13 +225,15 @@ class TrackStore:
         active = [r for r in visible if r.status == ACTIVE]
         return dict(
             packets=self.packets_total, invalid=self.packets_invalid,
+            identity_downgrades=self.identity_downgrades,
+            tracks_downgraded=len(self._downgraded),
             invalid_by_reason=dict(self.invalid_by_reason), stale_packets=self.stale_packets,
             restarts=self.restarts, unknown_sensor_ids=dict(self.unknown_sensor_ids),
             last_packet_age_s=None if self.last_packet_wall is None else now_wall - self.last_packet_wall,
             last_packet_time=self.last_packet_time,
             active_system_tracks=len(active), stale_system_tracks=len(visible) - len(active),
             active_sensor_tracks=sum(r.state.num_sensors for r in active),
-            known_system_tracks=len(self.records),
+            known_system_tracks=len(self.records), forgotten_tracks=self.forgotten,
             packet_rate_hz=self.packet_rate(now_wall),
             newest_time=self.newest_time,
         )

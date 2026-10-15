@@ -176,5 +176,81 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual((st["active_system_tracks"], st["active_sensor_tracks"]), (1, 2))
 
 
+
+class TestPacketTimeIsNotDraggedBackwards(unittest.TestCase):
+    """The world clock anchors on newest_time, so it must never walk backwards.
+
+    MultiTrack emits one packet per sensor report and interleaves system tracks, so a packet
+    for ST5 at t=100 can legitimately be followed by one for ST9 at t=92. Neither is stale for
+    its own track. If newest_time took the latest ARRIVAL, the controller would read the drop
+    as an RDP restart and yank the displayed simulation time back with it.
+    """
+
+    def test_an_older_packet_for_another_track_does_not_lower_it(self):
+        store = TrackStore(CFG, NAMES)
+        store.ingest(packet(track_id=5, t=100.0))
+        store.ingest(packet(track_id=9, t=92.0))          # a different track, earlier report
+        self.assertEqual(store.stats(200.0)["newest_time"], 100.0)
+
+    def test_it_still_rises_with_a_newer_packet(self):
+        store = TrackStore(CFG, NAMES)
+        store.ingest(packet(track_id=5, t=100.0))
+        store.ingest(packet(track_id=9, t=140.0))
+        self.assertEqual(store.stats(200.0)["newest_time"], 140.0)
+
+    def test_the_last_arrival_is_still_reported_separately(self):
+        """last_packet_time is a different question - what arrived most recently - and the
+        status bar uses it to say how current the stream is."""
+        store = TrackStore(CFG, NAMES)
+        store.ingest(packet(track_id=5, t=100.0))
+        store.ingest(packet(track_id=9, t=92.0))
+        self.assertEqual(store.last_packet_time, 92.0)
+
+
+
+class TestTheStoreStaysBounded(unittest.TestCase):
+    """Fusion mints a fresh system track id whenever a report fails to correlate - 31 of them
+    for 5 targets in this scenario - so a store that never forgets grows for ever."""
+
+    def _fill(self, n, cfg=None):
+        store = TrackStore({**CFG, **(cfg or {})}, NAMES)
+        for i in range(n):
+            store.ingest(packet(track_id=i, t=float(i)))
+        return store
+
+    def test_tracks_still_being_drawn_are_kept(self):
+        store = self._fill(50, {"forget_timeout_s": 60.0})
+        store.tick(1.0)
+        self.assertEqual(len(store.records), 50)
+
+    def test_hidden_tracks_are_remembered_for_a_while(self):
+        """A track that goes quiet briefly must come back as itself, not as a new track."""
+        store = self._fill(50, {"forget_timeout_s": 60.0, "hide_timeout_s": 10.0})
+        store.tick(30.0)                       # hidden, but not yet forgotten
+        self.assertEqual(len(store.records), 50)
+
+    def test_long_dead_tracks_are_forgotten(self):
+        store = self._fill(50, {"forget_timeout_s": 60.0, "hide_timeout_s": 10.0})
+        store.tick(600.0)
+        self.assertEqual(len(store.records), 0)
+        self.assertEqual(store.stats(600.0)["forgotten_tracks"], 50)
+
+    def test_a_hard_ceiling_applies_even_when_nothing_has_aged_out(self):
+        """Tracks arriving faster than they age out must still not grow without limit."""
+        store = self._fill(300, {"forget_timeout_s": 10_000.0, "max_records": 100})
+        store.tick(1.0)
+        self.assertLessEqual(len(store.records), 100)
+
+    def test_forgetting_does_not_disturb_a_live_track(self):
+        store = TrackStore({**CFG, "forget_timeout_s": 60.0, "hide_timeout_s": 10.0}, NAMES)
+        for i in range(20):
+            store.ingest(packet(track_id=i, t=float(i)))
+        store.ingest(packet(track_id=99, t=500.0))        # the one still reporting
+        store.records[99].last_update_wall = 600.0
+        store.tick(600.0)
+        self.assertIn(99, store.records)
+        self.assertEqual(len(store.records), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

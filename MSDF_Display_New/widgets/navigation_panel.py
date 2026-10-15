@@ -149,8 +149,6 @@ class LayersPage(QtWidgets.QWidget):
 class SettingsPage(QtWidgets.QWidget):
     reload_requested = QtCore.Signal()
     report_requested = QtCore.Signal()
-    sound_toggled = QtCore.Signal(bool)
-    volume_changed = QtCore.Signal(float)       # 0..1
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -189,25 +187,6 @@ class SettingsPage(QtWidgets.QWidget):
                                 objectName="Hint")
         hint.setWordWrap(True)
         lay.addWidget(hint)
-        # aircraft background ambience (3D view only; visual immersion, linked to no data)
-        audio = controller.config.get("audio", {})
-        lay.addWidget(QtWidgets.QLabel("AIRCRAFT SOUND (3D VIEW)", objectName="SectionLabel"))
-        self.sound = QtWidgets.QCheckBox("Aircraft background sound")
-        self.sound.setChecked(bool(audio.get("enabled", True)))
-        self.sound.setToolTip("Ambience while the 3D view is on screen. It represents no data.")
-        self.sound.toggled.connect(self.sound_toggled)
-        lay.addWidget(self.sound)
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("Volume"))
-        self.volume = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.volume.setRange(0, 100)
-        self.volume.setValue(int(round(100 * float(audio.get("volume", 0.25)))))
-        self.volume_label = QtWidgets.QLabel(f"{self.volume.value()} %")
-        self.volume.valueChanged.connect(lambda v: (self.volume_label.setText(f"{v} %"),
-                                                    self.volume_changed.emit(v / 100.0)))
-        row.addWidget(self.volume, 1)
-        row.addWidget(self.volume_label)
-        lay.addLayout(row)
         src = QtWidgets.QLabel(f"Scenario Export: {controller.export.root}\n"
                                f"RDP: UDP {controller.rdp.host}:{controller.rdp.port}"
                                + ("" if controller.rdp.enabled else " (disabled)"), objectName="Hint")

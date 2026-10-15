@@ -5,7 +5,7 @@ folder on any operating system and still run:
 
     PROJECT_ROOT   this package's own folder (the directory holding main.py)
     CONFIG_DIR     PROJECT_ROOT/config          display_config.json
-    ASSETS_DIR     PROJECT_ROOT/assets          aircraft model, ambience
+    ASSETS_DIR     PROJECT_ROOT/assets          aircraft model
     DATA_DIR       PROJECT_ROOT/data            a Scenario Export copied next to the app
     SAMPLE_DIR     PROJECT_ROOT/sample_data     clearly-labelled test data, if any
     LOG_DIR        PROJECT_ROOT/logs            rotating application log

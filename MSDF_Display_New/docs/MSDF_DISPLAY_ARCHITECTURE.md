@@ -120,7 +120,7 @@ visualization/style.py          classification colour and source symbol — the 
 visualization/symbols.py        Qt symbol cache
 visualization/hover.py          hover picking and detail text
 widgets/                        main window, panels, table, status, pop-out, audio, theme
-assets/                         aircraft model (optional), ambience wav
+assets/                         aircraft model (optional)
 tests/                          unit tests + gui_smoke.py
 ```
 
@@ -150,7 +150,7 @@ the project, install `requirements.txt` and are safe to run repeatedly. Installa
 
 1. `main.py` reads the configuration (`--config`, `MSDF_CONFIG`, or
    `config/display_config.json`), resolves the Scenario Export, opens the rotating log and
-   applies command-line overrides (`--export`, `--rdp-port`, `--no-rdp`, `--no-sound`, `--view`,
+   applies command-line overrides (`--export`, `--rdp-port`, `--no-rdp`, `--view`,
    `--time`, `--screenshot`, `--log-level`).
 2. `ViewController.__init__` reads **only** `sensor_properties.json` (small) so sensor
    configuration exists before any big file is touched, and constructs `RdpClient` and
@@ -303,7 +303,6 @@ ownship, radar poses, beam and targets are looked up at that time in the cached 
 | Track table | 5 Hz | `display.table_rate_hz` |
 | Target trajectory rebuild (3D) | ≤5 Hz | `view_3d` trail clock |
 | Hover refresh | ≤5 Hz while the cursor rests | `view_3d`, `hover` |
-| Audio visibility poll | 2.5 Hz | `aircraft_audio` |
 
 ## 20. 3D world view
 
@@ -428,7 +427,7 @@ shows a tail, not the whole recorded flight sweeping across it.
 
 Two independent dimensions, never mixed (`visualization/style.py` is the only definition):
 
-* **classification → colour** (Friendly green, Neutral white, Hostile red, Unknown yellow);
+* **classification → colour** (Friendly green, Unknown yellow - the only two the display has);
 * **track type → shape**: **sensor track = square, fused system track = triangle**, truth target
   = aircraft silhouette, ownship = its aircraft model (world views) or its own outlined triangle
   (PPI).
@@ -504,14 +503,6 @@ Repeated cycles showed no private-bytes growth (six cycles each).
 
 ## 32. Audio
 
-`widgets/aircraft_audio.py` plays one looping ambience (`assets/aircraft_background.wav`, 8 s,
-16-bit PCM mono 44.1 kHz, synthesised to be exactly periodic) while the 3D view is on screen and
-sound is enabled. One `QSoundEffect` exists for the whole application, loading is asynchronous
-and play/stop return immediately, so neither the GUI nor the receiver thread is blocked. If the
-file or QtMultimedia is unavailable it reports "Aircraft background sound unavailable. 3D
-visualization will continue without audio." and the view works normally. The sound represents no
-data.
-
 ## 33. Configuration reference
 
 `config/display_config.json`:
@@ -524,7 +515,6 @@ data.
 | status line | counts are stated in words: `Sensor N (per sensor) · Fused N · Total N`, with a tooltip defining both; a sensor track belongs to one sensor, a fused track is the fusion engine's system track, and neither count is ever a sensor id |
 | `display` | `frame_rate_hz`, `table_rate_hz`, `playback_rate`, `trail_seconds`, `velocity_vector_seconds`, `acceleration_vector_scale_s2`, `aircraft_scale`, `target_marker_scale`, `coverage_draw_range_m`, `ppi_range_m`, `terrain_extent_m`, `grid_spacing_m`, `depth_peeling` |
 | `layers` | the layer switches listed in §30 |
-| `audio` | `enabled`, `volume`, `file` |
 | `logging` | `level`, `max_bytes`, `backups` |
 
 Paths in the configuration are relative to the project folder (absolute ones are accepted), so

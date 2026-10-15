@@ -37,9 +37,27 @@ from visualization import hover, scan_beam, scenery, sensor_coverage, style, sym
 from visualization.tracks_2d import TrackItems2D, track_label, visible_tracks
 
 KM = 1e-3
-# coverage stays subordinate to the data drawn over it (tracks, targets, ownship)
-COVERAGE_FILL_ALPHA = 22
-COVERAGE_EDGE_ALPHA = 130
+# Everything below is PRESENTATION ONLY. None of it touches a position, a track identity or a
+# transformation - this view stays global Cartesian ENU, X East / Y North, as it always was.
+#
+# The rule the numbers follow: the aircraft and the tracks are the subject; terrain, coverage
+# and the beam are context and must never compete with them. The previous values let the
+# context win - a saturated terrain image, a bright beam slab and a legend box sitting over
+# the middle of the map.
+COVERAGE_FILL_ALPHA = 16          # field of regard: present, never a block of colour
+COVERAGE_EDGE_ALPHA = 105
+BEAM_FILL_ALPHA = 55              # the live dwell: brighter than coverage, still see-through
+BEAM_EDGE_ALPHA = 150
+TERRAIN_OPACITY = 0.55            # ground context, well behind the data
+#: The ground image is mixed toward the chart background before it is drawn. At full strength
+#: it reads as a satellite photograph competing with the symbols; muted, it does what ground
+#: context is for - telling you coast from land and high from low - without becoming the
+#: subject. This is a display mix only; scenery.land_cover is untouched.
+TERRAIN_MUTE = 0.58               # 0 = the rendered colours, 1 = the chart background
+TERRAIN_BACKGROUND = (17, 27, 43)
+OWNSHIP_SIZE_PX = 22              # clearly the ownship, not a billboard
+FIT_PADDING = 0.06                # of the fitted span, so the data fills the canvas
+GRID_ALPHA = 0.12
 
 
 def _polygon(points_m) -> QtGui.QPolygonF:
@@ -64,7 +82,7 @@ class View2D(QtWidgets.QWidget):
         pl = self.pw.getPlotItem()
         self.plot = pl
         pl.setAspectLocked(True, ratio=1.0)
-        pl.showGrid(x=True, y=True, alpha=0.18)
+        pl.showGrid(x=True, y=True, alpha=GRID_ALPHA)
         for ax, lab in (("bottom", "X  —  East (km)"), ("left", "Y  —  North (km)")):
             a = pl.getAxis(ax)
             a.setStyle(maxTickLevel=1)              # major + minor grid only (see module note)
@@ -81,7 +99,7 @@ class View2D(QtWidgets.QWidget):
         # ground context: the same deterministic world the 3D view builds, as one image
         self.map_image = pg.ImageItem()
         self.map_image.setZValue(-10)
-        self.map_image.setOpacity(0.85)
+        self.map_image.setOpacity(TERRAIN_OPACITY)
         pl.addItem(self.map_image)
         self.map_items: list = []
         self.scenery = None
@@ -103,7 +121,6 @@ class View2D(QtWidgets.QWidget):
         self.objects = TrackItems2D(pl, self.palette, z=20, label_size=8)
         self._hover_extra: list = []
         self.hover = hover.HoverInspector(self.pw, self._hover_entries, self._describe)
-        self._build_legend()
 
         controller.frame_ready.connect(self.on_frame)
         controller.data_loaded.connect(lambda *_: self._loaded())
@@ -152,7 +169,11 @@ class View2D(QtWidgets.QWidget):
         pos = self.ctrl.scenario.ownship.pos
         self.scenery = scenery.Scenery(lo=np.asarray(lo, float), hi=np.asarray(hi, float),
                                        track=(pos[0], pos[-1]))
-        margin = 0.35 * max(hi[0] - lo[0], hi[1] - lo[1])
+        # Rendered over everything the view can frame, not only the ownship's own bounds:
+        # scene_bounds() is the ownship track alone, and a ground image that small reads as a
+        # green rectangle floating in an empty chart once the view is fitted to the targets.
+        lo, hi = self._content_bounds()
+        margin = 0.30 * max(hi[0] - lo[0], hi[1] - lo[1])
         x0, x1 = lo[0] - margin, hi[0] + margin
         y0, y1 = lo[1] - margin, hi[1] + margin
         n = 360
@@ -164,19 +185,21 @@ class View2D(QtWidgets.QWidget):
         # a little shading from the terrain slope, so relief reads on a flat map
         gy, gx = np.gradient(Z)
         shade = np.clip(1.0 + (gx + gy) / (np.abs(gx).max() + np.abs(gy).max() + 1e-6) * 0.5, 0.65, 1.35)
-        rgb = np.clip(rgb * shade[..., None], 0, 255).astype(np.uint8)
+        rgb = np.clip(rgb * shade[..., None], 0, 255)
+        back = np.asarray(TERRAIN_BACKGROUND, float)
+        rgb = np.clip(rgb * (1.0 - TERRAIN_MUTE) + back * TERRAIN_MUTE, 0, 255).astype(np.uint8)
         self.map_image.setImage(rgb)
         self.map_image.setRect(QtCore.QRectF(x0 * KM, y0 * KM, (x1 - x0) * KM, (y1 - y0) * KM))
         af = self.scenery.airfield
         a = np.array([np.sin(np.radians(af.heading_deg)), np.cos(np.radians(af.heading_deg))])
         ends = np.array([af.center - a * af.runway_length_m / 2, af.center + a * af.runway_length_m / 2])
         rwy = pg.PlotCurveItem(ends[:, 0] * KM, ends[:, 1] * KM,
-                               pen=pg.mkPen(scenery.MARKING, width=3))
+                               pen=pg.mkPen(scenery.MARKING, width=2))
         rwy.setZValue(-9)
         self.plot.addItem(rwy)
-        lab = pg.TextItem(f"AIRFIELD {af.designators[0]}/{af.designators[1]}", color="#94a3b8",
+        lab = pg.TextItem(f"{af.designators[0]}/{af.designators[1]}", color="#6b7a8d",
                           anchor=(0.5, -0.4))
-        lab.setFont(QtGui.QFont("Consolas", 8))
+        lab.setFont(QtGui.QFont("Consolas", 7))
         lab.setPos(af.center[0] * KM, af.center[1] * KM)
         lab.setZValue(-9)
         self.plot.addItem(lab)
@@ -192,38 +215,33 @@ class View2D(QtWidgets.QWidget):
         self.message.setVisible(False)
         self.fit_all()
 
-    def _build_legend(self):
-        """In-plot legend: ownship, vectors and each sensor's projected coverage / beam."""
-        leg = pg.LegendItem(offset=(8, 8), labelTextColor="#cbd5e1", labelTextSize="7pt", verSpacing=-6,
-                            brush=pg.mkBrush(11, 18, 32, 200), pen=pg.mkPen("#334155"))
-        leg.setParentItem(self.plot.vb)
-        leg.addItem(pg.ScatterPlotItem(symbol=symbols.AIRCRAFT, size=12, pen=pg.mkPen("#0f172a"),
-                                       brush=pg.mkBrush(style.OWNSHIP_COLOR)), "Ownship")
-        leg.addItem(pg.PlotDataItem(pen=pg.mkPen(style.VELOCITY_COLOR, width=2)), "Velocity vector")
-        leg.addItem(pg.ScatterPlotItem(symbol=symbols.AIRCRAFT, size=12, pen=pg.mkPen(style.class_color("UNKNOWN")),
-                                       brush=pg.mkBrush(style.AIRCRAFT_ICON_FILL)), "Target (truth) + trajectory")
-        for key in (style.PRIMARY, style.SECONDARY, style.FUSED):
-            src = style.SOURCES[key]
-            leg.addItem(pg.ScatterPlotItem(symbol=symbols.symbol(src, 0.0), size=11, brush=None,
-                                           pen=pg.mkPen(style.class_color(""), width=1.4)), f"RDP {src.label}")
-        for s in self.ctrl.sensors:
-            col = QtGui.QColor(self.palette.sensor_color(s.sensor_id))
-            leg.addItem(pg.PlotDataItem(pen=pg.mkPen(col, width=6)),
-                        f"{s.name}: field of regard (sector) · scan beam (narrow)")
-        self.legend = leg
-        # the in-plot legend only when the plot is large enough not to be covered by it
-        self.plot.vb.sigResized.connect(
-            lambda *_: leg.setVisible(self.plot.vb.width() > 520 and self.plot.vb.height() > 330))
+    def _content_bounds(self):
+        """(lo, hi) in metres covering everything worth looking at: the ownship's own track,
+        the target trajectories and any live tracks. Falls back to the scene bounds."""
+        pts = [tg.pos[:, :2] for tg in (self.ctrl.scenario.targets
+                                        if self.ctrl.scenario is not None else [])]
+        if self.ctrl.scenario is not None:
+            pts.append(self.ctrl.scenario.ownship.pos[:, :2])
+        live = self.ctrl.world_tracks()
+        if live:
+            pts.append(np.array([tv.world[:2] for tv in live]))
+        if not pts:
+            lo, hi = (np.asarray(v, float)[:2] for v in self.ctrl.scene_bounds())
+            return lo, hi
+        allp = np.vstack(pts)
+        return allp.min(axis=0), allp.max(axis=0)
 
     def fit_all(self):
-        lo, hi = self.ctrl.scene_bounds()
-        pts = [tg.pos[:, :2] for tg in (self.ctrl.scenario.targets if self.ctrl.scenario is not None else [])]
-        pts += [np.array([tv.world[:2] for tv in self.ctrl.world_tracks()])] if self.ctrl.world_tracks() else []
-        if pts:
-            allp = np.vstack(pts)
-            lo = np.minimum(lo[:2], allp.min(axis=0))
-            hi = np.maximum(hi[:2], allp.max(axis=0))
-        pad = 0.08 * max(hi[0] - lo[0], hi[1] - lo[1], 1000.0)
+        """Frame what is actually flown, not the whole coordinate space.
+
+        The scene bounds are only a fallback here. Fitting to them left the aircraft and the
+        tracks crowded into a corner of a mostly empty canvas, because the bounds are set by
+        the extremes of the scenario rather than by where anything is. Fitting to the flown
+        trajectories and the live tracks uses the canvas for the data.
+        """
+        lo, hi = self._content_bounds()
+        span = max(hi[0] - lo[0], hi[1] - lo[1], 1000.0)
+        pad = FIT_PADDING * span
         self.plot.setRange(xRange=((lo[0] - pad) * KM, (hi[0] + pad) * KM),
                            yRange=((lo[1] - pad) * KM, (hi[1] + pad) * KM), padding=0)
 
@@ -291,7 +309,8 @@ class View2D(QtWidgets.QWidget):
             else:
                 for a in arcs:
                     a.setVisible(False)
-            beam = self._poly_item(self.beam_items, sid, self.palette.beam_color(sid), 120, 230, 3)
+            beam = self._poly_item(self.beam_items, sid, self.palette.beam_color(sid),
+                                   BEAM_FILL_ALPHA, BEAM_EDGE_ALPHA, 3)
             beam.setVisible(on and st.beam is not None and layers.get("show_scan_beam", True))
             if beam.isVisible():
                 beam.setPolygon(_polygon(scan_beam.beam_footprint_xy(st, rng)))
@@ -304,7 +323,7 @@ class View2D(QtWidgets.QWidget):
             it.setVisible(show_own)
         if show_own:
             # drawn along the flown path (own.heading_drawn); the exported Yaw stays in the panel
-            spot = dict(pos=(own.x * KM, own.y * KM), size=30,
+            spot = dict(pos=(own.x * KM, own.y * KM), size=OWNSHIP_SIZE_PX,
                         symbol=symbols.rotated(symbols.AIRCRAFT, own.heading_drawn),
                         pen=pg.mkPen("#0f172a", width=1), brush=pg.mkBrush(style.OWNSHIP_COLOR))
             self.own_marker.setData([spot])

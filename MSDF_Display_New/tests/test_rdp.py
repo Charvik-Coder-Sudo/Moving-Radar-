@@ -170,14 +170,18 @@ class TestDecoder(unittest.TestCase):
         s[1] = -math.inf
         self.assertRejected(self.good(sensor_states=[s]), "numeric")
 
-    def test_unused_slots_are_ignored(self):
-        v = list(struct.unpack(FORMAT, self.good()))
-        v[18 + 10:18 + 40] = [math.nan] * 30                       # slots 2..4 unused (numSensors = 1)
-        v[15:18] = [99, 99, 99]
-        st = decode(struct.pack(FORMAT, *v))
-        self.assertEqual(st.sensor_ids, (1,))
-        self.assertEqual(len(st.sensor_states), 1)
+    def test_legacy_packet_backward_compat(self):
+        """A legacy 436-byte packet without auth/icao must decode cleanly as unknown/None."""
+        from rdp.packet import encode_legacy_for_test, LEGACY_PACKET_SIZE
+        raw = encode_legacy_for_test(99, 100.5, 1, state(0.0), [1], [state(10.0)])
+        self.assertEqual(len(raw), LEGACY_PACKET_SIZE)
+        st = decode(raw)
+        self.assertEqual(st.system_track_id, 99)
+        self.assertEqual(st.time, 100.5)
+        self.assertEqual(st.auth, "unknown")
+        self.assertIsNone(st.icao)
 
 
 if __name__ == "__main__":
     unittest.main()
+

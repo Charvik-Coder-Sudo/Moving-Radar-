@@ -72,7 +72,7 @@ def check_layout() -> None:
            + (f" (created {', '.join(p.name for p in made)})" if made else ""))
     model = paths.ASSETS_DIR / "aircraft_background.wav"
     record(PASS if model.is_file() else WARN, "asset aircraft_background.wav",
-           str(model) if model.is_file() else "missing - the 3D view runs without ambience")
+           str(model) if model.is_file() else "missing - the 3D view uses its built-in model")
 
 
 def check_config() -> dict:

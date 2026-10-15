@@ -113,10 +113,10 @@ class TestTerrain(unittest.TestCase):
         np.testing.assert_allclose(fine[::11, ::11][both], coarse[both])
 
     def test_nothing_in_the_scenery_reaches_a_classification_colour(self):
-        """Scenery must never be mistaken for a Friendly / Hostile / Neutral / Unknown symbol."""
+        """Scenery must never be mistaken for a Friendly or Unknown symbol."""
         from visualization import style
         class_rgb = [np.array(style.hex_to_rgb(style.class_color(c)), float)
-                     for c in ("Friend", "Foe", "Neutral", "Unknown")]
+                     for c in ("Friend", "Unknown")]
         for name in ("WATER", "LOWLAND", "FIELD", "UPLAND", "ROCK", "FOREST", "BUILDING",
                      "HANGAR", "TOWER", "ROAD", "TREE", "RUNWAY"):
             c = np.array(scenery._hex(getattr(scenery, name)), float)

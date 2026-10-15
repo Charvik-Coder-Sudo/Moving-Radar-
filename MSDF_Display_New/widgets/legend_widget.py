@@ -14,7 +14,9 @@ class LegendWidget(QtWidgets.QFrame):
         SENSOR TRACKS  square - what one sensor sees (primary, secondary / IFF)
         SYSTEM TRACKS  triangle - the fusion output (and the truth target where shown)
 
-    Shape is the track type and colour is the classification, in every view.
+    Shape is the track type and colour is the classification, in every view - for TRACKS.
+    Truth targets are drawn in one neutral colour (style.TRUTH_COLOR) because they are the
+    simulation's record of where an aircraft is, not an identification anything made.
     """
 
     def __init__(self, columns: int = 2, include_target: bool = True, parent=None):
@@ -38,7 +40,8 @@ class LegendWidget(QtWidgets.QFrame):
             w.setToolTip(tip)
             return w
 
-        grid.addWidget(QtWidgets.QLabel("CLASSIFICATION  (colour)", objectName="LegendHead"), 0, 0, 1, columns)
+        grid.addWidget(QtWidgets.QLabel("TRACK CLASSIFICATION  (colour)", objectName="LegendHead"),
+                       0, 0, 1, columns)
         r = 1
         for i, cs in enumerate(style.CLASSIFICATIONS.values()):
             grid.addWidget(cell(symbols.swatch_pixmap(cs.color), cs.label,
@@ -58,6 +61,8 @@ class LegendWidget(QtWidgets.QFrame):
                        r, 0, 1, columns)
         r += 1
         system_srcs = [style.SOURCES[style.FUSED]] + ([style.SOURCES[style.TARGET]] if include_target else [])
+        truth_tip = ("Truth is drawn in one neutral colour, never a classification one: it is "
+                     "where the simulated aircraft actually is, not what the tracker identified.")
         for i, src in enumerate(system_srcs):
             tip = ("Fused system track: the fusion engine's output. Triangle = fused track, drawn "
                     "larger and brighter than the sensor tracks it comes from"

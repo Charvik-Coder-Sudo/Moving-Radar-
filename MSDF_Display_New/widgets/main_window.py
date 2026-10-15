@@ -16,8 +16,7 @@ The centre switches between the 3D and the 2D world view (buttons, keys 3 / 2); 
 draw the same data from the ONE controller (one UDP receiver, one track store, one
 cached Scenario Export). [⤢] on a world view maximises it inside this window (Esc
 returns, F11 fullscreen); [⤢] on the PPI opens it in its own window (the same widget
-is moved - widgets.popout). The aircraft ambience plays while the 3D view is on
-screen (widgets.aircraft_audio).
+is moved - widgets.popout).
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from visualization.aircraft_ppi import AircraftPPI
 from visualization.view_2d import View2D
 from visualization.view_3d_quick import QuickWorldView
-from widgets.aircraft_audio import AircraftAmbience
 from widgets.navigation_panel import NavigationPanel
 from widgets.ownship_panel import OwnshipPanel
 from widgets.popout import PopOutManager
@@ -168,11 +166,14 @@ class MainWindow(QtWidgets.QMainWindow):
         own_scroll.setWidgetResizable(True)
         own_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         own_scroll.setWidget(OwnshipPanel(controller))
+        # enough for all nine values and their three headings, so the splitter cannot squeeze
+        # the read-out down to the first section
+        own_scroll.setMinimumHeight(268)
         right.addWidget(own_scroll)
         # the PPI still leads, but the ownship block needs enough height for the attitude
         # instrument to be visible without scrolling to it
         right.setStretchFactor(0, 3)
-        right.setStretchFactor(1, 2)
+        right.setStretchFactor(1, 3)
         right.setChildrenCollapsible(False)
         self.right_split = right
 
@@ -229,23 +230,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nav.view_selected.connect(self._nav_view)
         self.nav.bind_camera(self.view3d)     # sidebar camera controls and 3D toolbar, in step
 
-        # aircraft ambience: 3D view only, one instance, independent of the data
-        self.ambience = AircraftAmbience(self.view3d, controller.config.get("audio", {}), controller.app_dir, self)
-        self.sound_btn = QtWidgets.QToolButton(text="🔊", checkable=True, checked=self.ambience.enabled)
-        self.sound_btn.setToolTip("Aircraft background sound while the 3D view is on screen (Settings: volume)")
-        self.sound_btn.toggled.connect(self._set_sound)
-        self.view3d.findChild(QtWidgets.QFrame, "ViewToolbar").layout().addWidget(self.sound_btn)
-        self.nav.settings.sound_toggled.connect(self._set_sound)
-        self.nav.settings.volume_changed.connect(self.ambience.set_volume)
-        if self.ambience.error:
-            self.sound_btn.setEnabled(False)
-            self.sound_btn.setToolTip(f"Aircraft background sound unavailable: {self.ambience.error}")
-            QtCore.QTimer.singleShot(0, lambda: self.status.showMessage(
-                "Aircraft background sound unavailable. 3D visualization will continue without audio."))
-
         self._build_menu()
         self.status = self.statusBar()
         controller.status_message.connect(lambda m: self.status.showMessage(m))
+        controller.scenario_state.connect(self._on_scenario_state)
         controller.view_mode_changed.connect(self._apply_view_mode)
         controller.playing_changed.connect(lambda *_: self._update_state())
         controller.data_loaded.connect(lambda *_: self._update_state())
@@ -270,15 +258,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.ctrl.set_view_mode(mode)
 
-    def _set_sound(self, on: bool):
-        """One switch, two controls (3D toolbar button and Settings checkbox) kept in step."""
-        for w in (self.sound_btn, self.nav.settings.sound):
-            if w.isChecked() != on:
-                w.blockSignals(True)
-                w.setChecked(on)
-                w.blockSignals(False)
-        self.ambience.set_enabled(on)
-
     def _popout_changed(self, name, out):
         widgets = [self.popout_btns["3d"], self.popout_btns["2d"]] if name == "world" else \
             [self.popout_btns["ppi"], self.nav.view_btns["ppi"]]
@@ -286,7 +265,6 @@ class MainWindow(QtWidgets.QMainWindow):
             w.blockSignals(True)
             w.setChecked(out)
             w.blockSignals(False)
-        self.ambience.update()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -300,14 +278,16 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QTimer.singleShot(300, self._initial_split)
 
     def _initial_split(self):
-        """Proportions of the final (maximized) window: table ~28 %, PPI ~62 % of the right column."""
+        """Proportions of the final (maximized) window: table ~28 %, PPI ~56 % of the right
+        column - the PPI is a circle and gains nothing from the extra height, while the
+        ownship read-out needs enough room to show all nine values without scrolling."""
         self._split_done = True
         h = self.main_split.height()
         self.main_split.setSizes([int(h * 0.72), int(h * 0.28)])
         w = self.top_split.width()
         self.top_split.setSizes([int(w * 0.15), int(w * 0.60), int(w * 0.25)])
         rh = self.right_split.height()
-        self.right_split.setSizes([int(rh * 0.64), int(rh * 0.36)])
+        self.right_split.setSizes([int(rh * 0.56), int(rh * 0.44)])
 
     # ------------------------------------------------------------------ header
     def _build_sidebar(self):
@@ -389,6 +369,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live_btn.setToolTip("Follow the packet time again (after a replay / seek)")
         self.live_btn.clicked.connect(self.ctrl.go_live)
         h.addWidget(self.live_btn)
+        self._scenario_state = "NOT LOADED"
+        # Which Scenario Export is actually in use. Shown rather than assumed, because it can
+        # now be chosen at run time (File > Load Scenario Folder) and the answer matters.
+        self.scenario_path = QtWidgets.QLabel("", objectName="ViewInfo")
+        self.scenario_path.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.scenario_path.setMaximumWidth(320)
+        h.addWidget(self.scenario_path)
         self.state_pill = QtWidgets.QLabel("", objectName="StatePill")
         self.state_pill.setToolTip("World views: following the packets (LIVE), replaying the export, or loading")
         h.addWidget(self.state_pill)
@@ -396,6 +383,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&File")
+        m.addAction("&Load Scenario Folder…", self.choose_scenario_folder,
+                    QtGui.QKeySequence.Open)
         m.addAction("&Reload Scenario Export", self.ctrl.load_scenario, QtGui.QKeySequence.Refresh)
         m.addAction("&Validation Report…", self.show_report)
         m.addSeparator()
@@ -415,12 +404,46 @@ class MainWindow(QtWidgets.QMainWindow):
         h = self.menuBar().addMenu("&Help")
         h.addAction("&Conventions", self._conventions)
 
+    def _on_scenario_state(self, state: str, detail: str):
+        """NOT LOADED / VALIDATING / LOADED / FAILED, straight from the controller."""
+        self._scenario_state = state
+        if state == "LOADED":
+            self.scenario_path.setText(detail)
+            self.scenario_path.setToolTip("Scenario Export in use: " + detail)
+        self._update_state()
+
+    def choose_scenario_folder(self):
+        """Pick a Scenario Export folder, validate it, and load it only if it is one.
+
+        A folder, not files: the export is a directory tree and the user should not have to
+        find each CSV. The validation runs before anything is swapped, so choosing the wrong
+        folder leaves a scenario that is already loaded exactly as it was.
+        """
+        start = str(getattr(self.ctrl.export, "root", "") or self.ctrl.app_dir)
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select the Scenario Export folder", start,
+            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks)
+        if not folder:
+            return
+        ok, reasons = self.ctrl.load_scenario_from(folder)
+        if ok:
+            return
+        # Say WHAT is wrong with it. "Invalid scenario" tells the user nothing they can act on.
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("Scenario Export validation failed")
+        kept = ("The scenario already loaded has been kept." if self.ctrl.is_ready
+                else "No scenario is loaded.")
+        box.setText("This folder is not a usable Scenario Export:")
+        box.setInformativeText(f"{folder}\n\n{len(reasons)} problem(s) found. {kept}")
+        box.setDetailedText("\n".join(reasons))
+        box.exec()
+
     # ------------------------------------------------------------------ behaviour
     def _apply_view_mode(self, mode):
         self.stack.setCurrentWidget(self.view3d if mode == "3d" else self.view2d)
         self.mode_btns[mode].setChecked(True)
         self.nav.view_btns[mode].setChecked(True)
-        self.ambience.update()                      # 3D off screen -> ambience stops now
 
     @staticmethod
     def _pill(label, text, state):
@@ -431,10 +454,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_state(self):
         c = self.ctrl
-        if c.load_error:
-            text, state = "EXPORT ERROR", "nodata"
+        # The pill must never say LOADED before a scenario has actually validated and loaded.
+        # "VALIDATION FAILED" and "NOT LOADED" are different things and are shown as such.
+        if self._scenario_state == "FAILED" or c.load_error:
+            text, state = ("VALIDATION FAILED" if self._scenario_state == "FAILED"
+                           else "EXPORT ERROR"), "nodata"
+        elif self._scenario_state == "VALIDATING" and not c.is_ready:
+            text, state = "VALIDATING SCENARIO", "paused"
         elif not c.is_ready:
-            text, state = "LOADING EXPORT", "paused"
+            text, state = "SCENARIO NOT LOADED", "nodata"
         elif c.live_following:
             text, state = "FOLLOWING PACKETS", "online"
         elif c.is_playing:
@@ -472,7 +500,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ValidationDialog([("Scenario Export", "\n".join(lines)), ("RDP packets", "\n".join(rdp))], self).exec()
 
     def closeEvent(self, e):
-        self.ambience.shutdown()
         self.popouts.restore_all()
         self.ctrl.shutdown()
         super().closeEvent(e)
